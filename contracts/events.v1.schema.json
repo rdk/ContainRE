@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://containre.dev/contracts/events.v1.schema.json",
+  "title": "ContainRE trace event (v1)",
+  "description": "One record of the ordered event stream. Identical shape whether read live over WebSocket or from events.jsonl on disk. The common envelope carries ordering/identity; kind-specific payload lives under `data`. Additive-only within major version 1; readers MUST ignore unknown fields and tolerate unknown enum/kind values.",
+  "type": "object",
+  "required": ["schema_version", "seq", "ts_mono", "kind", "data"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "seq": { "type": "integer", "minimum": 0, "description": "Per-run, gap-free, strictly increasing ordering key / resume cursor." },
+    "ts_mono": { "type": "integer", "description": "Monotonic clock, nanoseconds. Ordering authority within a run." },
+    "ts_wall": { "type": "integer", "description": "Optional Unix wall-clock, nanoseconds." },
+    "pid": { "type": "integer", "description": "Specimen-namespace PID that produced the event." },
+    "tid": { "type": "integer", "description": "Thread id, when relevant." },
+    "kind": {
+      "enum": ["syscall", "net", "file", "mem", "proc", "signal", "instr", "detection", "gate"],
+      "description": "Selects the shape of `data`."
+    },
+    "data": { "type": "object", "description": "Kind-specific payload; see $defs." }
+  },
+  "allOf": [
+    { "if": { "properties": { "kind": { "const": "syscall" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/syscall" } } } },
+    { "if": { "properties": { "kind": { "const": "net" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/net" } } } },
+    { "if": { "properties": { "kind": { "const": "file" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/file" } } } },
+    { "if": { "properties": { "kind": { "const": "mem" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/mem" } } } },
+    { "if": { "properties": { "kind": { "const": "proc" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/proc" } } } },
+    { "if": { "properties": { "kind": { "const": "signal" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/signal" } } } },
+    { "if": { "properties": { "kind": { "const": "instr" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/instr" } } } },
+    { "if": { "properties": { "kind": { "const": "detection" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/detection" } } } },
+    { "if": { "properties": { "kind": { "const": "gate" } }, "required": ["kind"] }, "then": { "properties": { "data": { "$ref": "#/$defs/gate" } } } }
+  ],
+  "$defs": {
+    "hex": { "type": "string", "pattern": "^0x[0-9a-fA-F]+$", "description": "Lowercase-preferred hex string with 0x prefix; keeps 64-bit values JSON-safe." },
+    "syscall": {
+      "type": "object",
+      "required": ["name", "phase"],
+      "properties": {
+        "nr": { "type": "integer", "description": "Syscall number (x86-64)." },
+        "name": { "type": "string" },
+        "phase": { "enum": ["enter", "exit"] },
+        "args": { "type": "array", "items": { "type": "string" }, "description": "Raw argument values (hex strings for pointers)." },
+        "ret": { "type": "string", "description": "Return value (present on exit)." },
+        "errno": { "type": "string", "description": "Symbolic errno on failure, e.g. EPERM." }
+      }
+    },
+    "net": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": { "enum": ["socket", "connect", "bind", "listen", "accept", "send", "recv", "close", "dns", "http"] },
+        "proto": { "enum": ["tcp", "udp", "icmp", "unix"] },
+        "laddr": { "type": "string", "description": "Local address ip:port." },
+        "raddr": { "type": "string", "description": "Remote address ip:port or host:port." },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "decision": { "enum": ["allow", "block", "simulated", "pending"], "description": "How the network policy handled this attempt." },
+        "flow_id": { "type": "string", "description": "Correlates events belonging to one connection/flow." },
+        "dns": {
+          "type": "object",
+          "properties": {
+            "qname": { "type": "string" },
+            "qtype": { "type": "string" },
+            "answers": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "http": {
+          "type": "object",
+          "properties": {
+            "method": { "type": "string" },
+            "host": { "type": "string" },
+            "path": { "type": "string" },
+            "status": { "type": "integer" },
+            "bytes": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": { "enum": ["open", "read", "write", "unlink", "rename", "mkdir", "chmod", "mmap", "truncate", "close"] },
+        "path": { "type": "string" },
+        "newpath": { "type": "string", "description": "Destination path for rename." },
+        "fd": { "type": "integer" },
+        "size": { "type": "integer", "minimum": 0 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "prot": { "type": "string", "description": "Protection flags for mmap, e.g. r-x." },
+        "flags": { "type": "string", "description": "Open/mmap flags, symbolic." },
+        "artifact_id": { "type": "string", "description": "Set when created/modified content was captured to files/." },
+        "decoy": { "type": "boolean", "description": "True when the path is a planted canary file." }
+      }
+    },
+    "mem": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": { "enum": ["snapshot", "region", "write", "map", "unmap", "protect"] },
+        "snapshot_id": { "type": "string", "description": "Blob id under snapshots/ for op=snapshot." },
+        "region": {
+          "type": "object",
+          "properties": {
+            "base": { "$ref": "#/$defs/hex" },
+            "size": { "type": "integer", "minimum": 0 },
+            "perms": { "type": "string", "description": "e.g. rwxp." },
+            "path": { "type": "string", "description": "Backing file, if any." }
+          }
+        },
+        "addr": { "$ref": "#/$defs/hex" },
+        "len": { "type": "integer", "minimum": 0 },
+        "old": { "$ref": "#/$defs/hex" },
+        "new": { "$ref": "#/$defs/hex" }
+      }
+    },
+    "proc": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": { "enum": ["exec", "clone", "fork", "thread_start", "thread_exit", "exit"] },
+        "path": { "type": "string" },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "child_pid": { "type": "integer" },
+        "ppid": { "type": "integer" },
+        "exit_code": { "type": "integer" },
+        "signal": { "type": "string", "description": "Terminating signal name, if killed." }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "required": ["signo", "name"],
+      "properties": {
+        "signo": { "type": "integer" },
+        "name": { "type": "string" },
+        "sender_pid": { "type": "integer" },
+        "handled": { "type": "boolean" }
+      }
+    },
+    "instr": {
+      "type": "object",
+      "required": ["ip", "window_id"],
+      "properties": {
+        "ip": { "$ref": "#/$defs/hex" },
+        "disasm": { "type": "string", "description": "Capstone rendering of the instruction." },
+        "window_id": { "type": "string", "description": "L2 tracing window this instruction belongs to." },
+        "reg_deltas": {
+          "type": "object",
+          "description": "Register name -> {old,new} for registers that changed.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": { "old": { "$ref": "#/$defs/hex" }, "new": { "$ref": "#/$defs/hex" } }
+          }
+        },
+        "mem_writes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["addr"],
+            "properties": {
+              "addr": { "$ref": "#/$defs/hex" },
+              "old": { "$ref": "#/$defs/hex" },
+              "new": { "$ref": "#/$defs/hex" },
+              "size": { "type": "integer" }
+            }
+          }
+        }
+      }
+    },
+    "detection": {
+      "type": "object",
+      "required": ["detector", "id", "severity", "title"],
+      "properties": {
+        "detector": { "enum": ["yara", "ioc", "heuristic"] },
+        "id": { "type": "string", "description": "Rule/heuristic identifier." },
+        "severity": { "enum": ["info", "low", "medium", "high", "critical"] },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "refs": {
+          "type": "object",
+          "properties": {
+            "addr": { "$ref": "#/$defs/hex" },
+            "artifact_id": { "type": "string" },
+            "snapshot_id": { "type": "string" },
+            "flow_id": { "type": "string" },
+            "seq": { "type": "integer", "description": "A related event seq." }
+          }
+        },
+        "iocs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "value"],
+            "properties": {
+              "type": { "enum": ["domain", "ip", "url", "path", "mutex", "hash", "email", "registry", "other"] },
+              "value": { "type": "string" }
+            }
+          }
+        },
+        "attack": { "type": "array", "items": { "type": "string" }, "description": "MITRE ATT&CK technique ids, e.g. T1055." }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": ["subject", "decision", "decided_by"],
+      "properties": {
+        "subject": { "enum": ["net", "file", "exec", "mem"] },
+        "target": { "type": "string", "description": "Human-readable subject of the decision, e.g. 1.2.3.4:443." },
+        "prompt": { "type": "string" },
+        "decision": { "enum": ["allow", "block", "pending"] },
+        "decided_by": { "enum": ["policy", "user", "default"] },
+        "flow_id": { "type": "string" }
+      }
+    }
+  }
+}

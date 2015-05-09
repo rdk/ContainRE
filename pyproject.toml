@@ -1,0 +1,54 @@
+[project]
+name = "containre"
+version = "0.1.0"
+description = "Sandbox, execution tracer, and flight recorder for potentially dangerous Linux binaries"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "rdk" }]
+dependencies = [
+    "python-ptrace>=0.9.9",
+    "pyyaml>=6.0",
+    "jsonschema>=4.18",
+    "typer>=0.12",
+    "fastapi>=0.139.0",
+    "uvicorn[standard]>=0.50.2",
+    "capstone>=5.0.9",
+    "unicorn>=2.1.4",
+    "yara-python>=4.5.4",
+    "cryptography>=49.0.0",
+]
+
+[project.optional-dependencies]
+snapshots = ["zstandard>=0.22"]
+
+[project.scripts]
+containre = "containre.cli.main:app"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.0",
+    "ruff>=0.15.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["containre"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "unit: pure or low-level tests that do not run specimens under ptrace",
+    "localnet: tests that bind or connect loopback sockets",
+    "docker: integration tests that need a usable Docker daemon (deselect with -m 'not docker')",
+    "specimen: tests that compile and run example specimen binaries under the harness",
+]

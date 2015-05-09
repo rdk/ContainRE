@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ContainRE</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --line:#2a3038; --fg:#c9d1d9; --dim:#8b949e;
+          --acc:#58a6ff; --crit:#ff6a69; --high:#ff9f43; --med:#e3b341; --low:#58a6ff; --ok:#3fb950; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { padding:8px 14px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }
+  header b { color:var(--acc); font-size:15px; }
+  header .sub { color:var(--dim); }
+  .wrap { display:grid; grid-template-columns:320px 1fr; height:calc(100vh - 42px); }
+  .col { overflow:auto; padding:10px; }
+  .left { border-right:1px solid var(--line); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin-bottom:8px; cursor:pointer; }
+  .card:hover { border-color:var(--acc); }
+  .card.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
+  .row { display:flex; justify-content:space-between; gap:8px; }
+  .dim { color:var(--dim); }
+  .pill { padding:0 6px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
+  .sev-critical{color:var(--crit)} .sev-high{color:var(--high)} .sev-medium{color:var(--med)}
+  .sev-low{color:var(--low)} .sev-info{color:var(--dim)}
+  .st-running{color:var(--ok)} .st-finished{color:var(--dim)} .st-killed{color:var(--high)}
+  h3 { margin:12px 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); }
+  input,select,button { background:#0d1117; color:var(--fg); border:1px solid var(--line); border-radius:5px; padding:4px 6px; font:inherit; }
+  button { cursor:pointer; } button:hover { border-color:var(--acc); }
+  form { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px; }
+  form input[name=binary]{ flex:1 1 100%; }
+  table { width:100%; border-collapse:collapse; }
+  td,th { padding:2px 6px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+  .stream { background:#0a0d12; border:1px solid var(--line); border-radius:6px; height:280px; overflow:auto; padding:6px; white-space:pre-wrap; }
+  .k-net{color:#79c0ff} .k-file{color:#a5d6ff} .k-proc{color:#d2a8ff} .k-mem{color:#f0883e}
+  .k-detection{color:var(--crit)} .k-signal{color:var(--dim)} .k-syscall{color:var(--dim)} .k-gate{color:var(--med)}
+  pre.hex { background:#0a0d12; border:1px solid var(--line); border-radius:6px; padding:8px; overflow:auto; max-height:340px; font-size:12px; }
+  .snap { display:inline-block; margin:2px; padding:2px 6px; border:1px solid var(--line); border-radius:5px; cursor:pointer; }
+  .snap:hover{ border-color:var(--acc); }
+  .muted{ color:var(--dim); }
+</style>
+</head>
+<body>
+<header><b>ContainRE</b><span class="sub">sandbox · tracer · flight recorder</span>
+  <span id="health" class="dim" style="margin-left:auto"></span></header>
+<div class="wrap">
+  <div class="col left">
+    <form id="launch">
+      <input name="binary" placeholder="/path/to/specimen" required/>
+      <select name="net"><option value="deny">deny</option><option value="simulate">simulate</option><option value="allow">allow</option></select>
+      <input name="decoys" placeholder="decoys (comma sep)" style="flex:1"/>
+      <button>Run</button>
+    </form>
+    <h3>Runs</h3>
+    <div id="runs"></div>
+  </div>
+  <div class="col right">
+    <div id="detail"><p class="muted">Select a run.</p></div>
+  </div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+let selected = null, ws = null;
+
+async function j(url, opts){ const r = await fetch(url, opts); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+
+async function health(){ try { const h = await j('/api/health'); $('#health').textContent = `runtime=${h.runtime} · cap=${h.max_concurrent}`; } catch(e){} }
+
+async function refreshRuns(){
+  let data; try { data = await j('/api/runs'); } catch(e){ return; }
+  const el = $('#runs'); el.innerHTML = '';
+  for(const m of data.runs){
+    const v = m.verdict||{}; const sev = v.max_severity||'info';
+    const d = document.createElement('div');
+    d.className = 'card' + (m.run_id===selected?' sel':'');
+    d.innerHTML = `<div class="row"><span>${m.run_id}</span><span class="st-${m.status}">${m.status}</span></div>`
+      + `<div class="row dim"><span class="sev-${sev}">${sev}</span><span>${(v.flags||[]).join(', ')||'-'}</span></div>`;
+    d.onclick = () => select(m.run_id);
+    el.appendChild(d);
+  }
+}
+
+async function select(id){
+  selected = id; refreshRuns();
+  const m = await j('/api/runs/'+id);
+  const v = m.verdict||{}, c = m.counts||{};
+  $('#detail').innerHTML = `
+    <div class="row"><h3>${id}</h3><span class="st-${m.status}">${m.status}${m.kill_reason? ' ('+m.kill_reason+')':''}</span></div>
+    <div class="dim">exit=${m.exit_code} · events=${c.events||0} · detections=${c.detections||0} · snapshots=${c.snapshots||0} · net=${c.net_flows||0}</div>
+    <div>verdict: <span class="sev-${v.max_severity||'info'}">${v.max_severity||'info'}</span> · flags=[${(v.flags||[]).join(', ')}] · attack=[${(v.attack||[]).join(', ')}]</div>
+    <h3>Detections</h3><div id="dets" class="muted">loading…</div>
+    <h3>Artifacts &amp; capture</h3><div id="arts" class="muted">loading…</div>
+    <h3>Live events</h3><div id="stream" class="stream"></div>
+    <h3>Memory snapshots <span class="muted">(online view)</span></h3><div id="snaps" class="muted">loading…</div>
+    <pre id="hex" class="hex muted">select a snapshot to view memory</pre>`;
+  openStream(id);
+  loadSnaps(id);
+  loadDetections(id);
+  loadArtifacts(id);
+}
+
+async function loadDetections(id){
+  let data; try { data = await j('/api/runs/'+id+'/detections'); } catch(e){ return; }
+  const el = $('#dets'); if(!el) return;
+  if(!data.detections.length){ el.innerHTML='<span class="muted">none</span>'; return; }
+  el.innerHTML = '<table><tr><th>sev</th><th>id</th><th>title</th><th>ATT&CK</th></tr>'
+    + data.detections.map(e=>{ const d=e.data; return `<tr><td class="sev-${d.severity}">${d.severity}</td>`
+      + `<td>${d.id}</td><td>${d.title||''}</td><td class="dim">${(d.attack||[]).join(', ')}</td></tr>`; }).join('')
+    + '</table>';
+}
+
+async function loadArtifacts(id){
+  let data; try { data = await j('/api/runs/'+id+'/artifacts'); } catch(e){ return; }
+  const el = $('#arts'); if(!el) return;
+  let html = '';
+  for(const a of data.artifacts)
+    html += `<div><a href="/api/runs/${id}/artifacts/${encodeURIComponent(a.name)}">${a.name}</a> <span class="dim">${a.size} B</span></div>`;
+  // pcap link (probe availability)
+  try { const h = await fetch('/api/runs/'+id+'/pcap', {method:'HEAD'});
+    if(h.ok) html += `<div><a href="/api/runs/${id}/pcap">capture.pcap</a> <span class="dim">tcpdump</span></div>`; } catch(e){}
+  el.innerHTML = html || '<span class="muted">none</span>';
+}
+
+function line(e){
+  const d = e.data; let s = '';
+  if(e.kind==='net') s = `${d.op} ${d.raddr||d.laddr||''} ${d.decision?('['+d.decision+']'):''}`;
+  else if(e.kind==='file') s = `${d.op} ${d.path||''}${d.decoy?' [DECOY]':''}`;
+  else if(e.kind==='proc') s = `${d.op} ${d.path||d.child_pid||d.exit_code||''}`;
+  else if(e.kind==='mem') s = `${d.op} ${d.reason||d.region?.perms||''} ${d.snapshot_id||d.region?.base||''}`;
+  else if(e.kind==='detection') s = `[${d.severity}] ${d.id}: ${d.title}`;
+  else s = JSON.stringify(d);
+  return `<div><span class="dim">#${String(e.seq).padStart(4)}</span> <span class="k-${e.kind}">${e.kind.padEnd(9)}</span> ${s}</div>`;
+}
+
+function openStream(id){
+  if(ws){ ws.close(); ws=null; }
+  const proto = location.protocol==='https:'?'wss':'ws';
+  ws = new WebSocket(`${proto}://${location.host}/api/runs/${id}/stream`);
+  const box = () => $('#stream');
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if(msg.type==='event' && box()){ box().insertAdjacentHTML('beforeend', line(msg.event)); box().scrollTop = box().scrollHeight; }
+    if(msg.type==='status' && !msg.active){ loadSnaps(id); refreshRuns(); }
+  };
+}
+
+async function loadSnaps(id){
+  let data; try { data = await j('/api/runs/'+id+'/snapshots'); } catch(e){ return; }
+  const el = $('#snaps'); if(!el) return;
+  if(!data.snapshots.length){ el.innerHTML = '<span class="muted">none</span>'; return; }
+  el.innerHTML = '';
+  for(const s of data.snapshots){
+    const sp = document.createElement('span'); sp.className='snap';
+    sp.textContent = `${s.data.reason||'snap'} · ${s.data.snapshot_id.slice(5,13)}`;
+    sp.onclick = () => viewMemory(id, s.data.snapshot_id);
+    el.appendChild(sp);
+  }
+}
+
+async function viewMemory(id, sid){
+  const hex = $('#hex'); hex.className='hex'; hex.textContent='loading…';
+  const m = await j(`/api/runs/${id}/memory?snapshot=${sid}`);
+  const regions = (m.regions||[]).map(r => `${r.base} ${String(r.size).padStart(9)} ${r.perms} ${r.path||''}`).join('\n');
+  hex.textContent = `regions in ${sid}:\n${regions}\n\n-- ${m.region? m.region.base+' '+m.region.perms : ''} --\n${m.hexdump||'(no bytes)'}`;
+}
+
+$('#launch').onsubmit = async ev => {
+  ev.preventDefault();
+  const f = ev.target;
+  const decoys = f.decoys.value.split(',').map(s=>s.trim()).filter(Boolean);
+  try {
+    const res = await j('/api/runs', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({binary:f.binary.value, net:f.net.value, decoys})});
+    setTimeout(()=>select(res.run_id), 200);
+  } catch(e){ alert('launch failed: '+e.message); }
+};
+
+health(); refreshRuns(); setInterval(refreshRuns, 2000);
+</script>
+</body>
+</html>

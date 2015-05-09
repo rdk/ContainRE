@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "run_id": "20260706T203100Z_dropper_a1b2c3",
+  "status": "finished",
+  "specimen": {
+    "path": "./samples/dropper.bin",
+    "sha256": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+    "size": 84120,
+    "elf": {
+      "arch": "x86-64",
+      "linkage": "dynamic",
+      "libc": "glibc",
+      "interp": "/lib64/ld-linux-x86-64.so.2",
+      "pie": true
+    }
+  },
+  "image": "containre/specimen-glibc:0.1",
+  "runtime": "docker",
+  "policy_ref": "policy.yaml",
+  "created_wall": 1751834860000000000,
+  "started_wall": 1751834861200000000,
+  "stopped_wall": 1751834880500000000,
+  "exit_code": 0,
+  "kill_reason": null,
+  "counts": {
+    "events": 18422,
+    "snapshots": 7,
+    "checkpoints": 1,
+    "detections": 4,
+    "artifacts": 3,
+    "net_flows": 5
+  },
+  "verdict": {
+    "max_severity": "high",
+    "attack": ["T1071.001", "T1055", "T1657"],
+    "flags": ["egress-attempt", "code-injection", "decoy-hit"]
+  },
+  "host": {
+    "kernel": "6.14.0-37-generic",
+    "docker": "27.3.1",
+    "criu": "3.19",
+    "containre": "0.1.0"
+  }
+}

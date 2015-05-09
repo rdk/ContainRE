@@ -1,0 +1,34 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+/build/
+*.egg-info/
+
+# Node (webapp/build IS committed so `containre serve` works without a toolchain)
+node_modules/
+.svelte-kit/
+
+# ContainRE run data (the directory-is-the-database; never commit specimen output)
+runs/
+*.pcap
+*.zst
+*.trace
+# CRIU images / memory dumps
+checkpoints/
+snapshots/
+
+# Specimens (never commit potentially dangerous binaries)
+samples/
+*.bin
+# Built example-specimen binaries (rebuilt from specimens/src via make)
+specimens/bin/
+
+# Local / editor
+.env
+.DS_Store
+*.local

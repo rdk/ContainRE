@@ -1,0 +1,86 @@
+# Example ContainRE run policy - validates against ../policy.v1.schema.json
+# NOTE: quote "off"/"on" in YAML - bare off/on parse as booleans.
+schema_version: 1
+
+specimen:
+  path: ./samples/dropper.bin
+  container_path: /specimen
+  args: ["--quiet"]
+  stdin: null
+  env: { LANG: C, TERM: xterm }
+  cwd: /work
+
+limits: { cpu: 1, mem_mb: 512, pids: 128, wallclock_s: 120, disk_mb: 256 }
+
+network:
+  posture: simulate      # deny | simulate | allow
+  simulate: true         # bring up the built-in NetSink
+  mitm: false
+  sink:
+    type: builtin        # builtin | h2-grpc-replay (experimental)
+    listen_port: 0       # 0 = dynamic; set original port for trace.tracer=none
+    # h2-grpc-replay can also return configured gRPC errors for payload probes:
+    # negative_feature_substrings: ["FEAT_ALPHA"]
+    # negative_grpc_status: "5"
+    # negative_grpc_message: "feature {feature} is not expected to exist in the server"
+  allow: []              # e.g. ["updates.vendor.com:443"]
+
+files:
+  work_mount: ./work
+  read_only_mounts:
+    - { source: /opt/vendor-suite, target: /opt/vendor-suite }
+  decoys: [canary.docx, wallet.dat, id_rsa]
+
+trace:
+  tracer: ptrace         # ptrace | none
+  l1: [net, file, proc, mmap, signal]
+  snapshot_on: [connect, mmap+x, exec, decoy]
+  snapshot_every_ms: 0
+  l2:
+    mode: "off"          # off | singlestep | unicorn
+    window: {}           # e.g. { until_io: true } or { addr_start: "0x401000", addr_end: "0x401200" }
+
+detect:
+  yara: true
+  iocs: true
+  heuristics: true
+  attack_tags: true
+  yara_rules: []
+
+instrumentation:
+  tls_plaintext:
+    enabled: false
+    provider: openssl-preload
+    mode: observe       # observe | replay; replay is experimental/invasive
+    output: null
+    max_bytes_per_record: 4096
+    replay_file: null   # required for mode: replay
+    fake_handshake: false
+    libssl: null
+
+runtime:
+  setup_commands: []     # run before specimen, inside the same runtime namespace
+  teardown_commands: []  # run after specimen or setup failure
+  command_shell: /bin/sh
+  command_timeout_s: 30
+  docker_reuse_container: false
+  docker_reuse_key: default
+  docker_user: null       # optional Docker --user value, e.g. "1000:1000"
+
+report:
+  assertions:
+    - id: no-real-egress
+      title: No remote endpoint traffic escaped containment
+      subject: network.allowed_remote_endpoint_event_count
+      op: eq
+      value: 0
+      severity: critical
+    - id: no-unexpected-archives
+      title: No archive-like output was materialized
+      subject: artifacts.names
+      op: none_match
+      value: ["*.zip", "*.tar", "*.tgz", "*.gz"]
+      match: glob
+      severity: high
+
+kill_on: [egress_violation, oom, timeout, decoy_write]
