@@ -1,0 +1,418 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://containre.dev/contracts/policy.v1.schema.json",
+  "title": "ContainRE run policy (v1)",
+  "description": "Declarative, per-run policy. Drives reproducible headless/API launches, and the effective policy is persisted into the run directory. Additive-only within major version 1.",
+  "type": "object",
+  "required": ["specimen"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Policy contract major version."
+    },
+    "specimen": {
+      "type": "object",
+      "description": "What to run and how it is invoked.",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "description": "Path (host-side) to the ELF specimen to analyze." },
+        "container_path": {
+          "type": ["string", "null"],
+          "pattern": "^/",
+          "description": "Optional Docker-only path used to execute the specimen inside the container. Defaults to /specimen.",
+          "default": null
+        },
+        "args": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "stdin": { "type": ["string", "null"], "description": "Path to a file fed as the specimen's stdin, or null.", "default": null },
+        "env": {
+          "type": "object",
+          "description": "Environment variables presented to the specimen.",
+          "additionalProperties": { "type": "string" },
+          "default": {}
+        },
+        "cwd": { "type": "string", "description": "Working directory inside the container.", "default": "/work" }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "description": "Per-run resource ceilings, enforced via cgroups and a wall-clock timer.",
+      "properties": {
+        "cpu": { "type": "number", "exclusiveMinimum": 0, "description": "CPU cores (fractional allowed).", "default": 1 },
+        "mem_mb": { "type": "integer", "minimum": 16, "default": 512 },
+        "pids": { "type": "integer", "minimum": 1, "default": 128 },
+        "wallclock_s": { "type": "integer", "minimum": 1, "default": 120 },
+        "disk_mb": { "type": "integer", "minimum": 1, "default": 256 }
+      },
+      "default": {}
+    },
+    "network": {
+      "type": "object",
+      "description": "Network posture. Default uses a simulated-internet sink with no real egress; real egress requires posture=allow or an explicit allowlist entry.",
+      "properties": {
+        "posture": {
+          "enum": ["deny", "simulate", "allow"],
+          "default": "simulate",
+          "description": "deny = no responders (attempts fail, still traced); simulate = built-in loopback sink answers supported protocols; allow = real egress (dangerous)."
+        },
+        "simulate": { "type": "boolean", "default": true, "description": "Bring up the built-in NetSink responder. Implied by posture=simulate." },
+        "mitm": { "type": "boolean", "default": false, "description": "Transparent TLS interception with an injected CA (detectable; off by default)." },
+        "docker_network": {
+          "enum": ["auto", "bridge", "host", "none"],
+          "default": "auto",
+          "description": "DockerRuntime network attachment. auto preserves ContainRE defaults; bridge attaches Docker bridge when real egress is explicitly allowed; host uses host networking and is accepted only with a non-empty ptrace allowlist; none forces --network none."
+        },
+        "allow": {
+          "type": "array",
+          "description": "Allowlist of real egress targets as host:port or ip:port (port optional = any).",
+          "items": { "type": "string", "pattern": "^[^\\s]+(:\\d{1,5})?$" },
+          "default": []
+        },
+        "sink": {
+          "type": "object",
+          "description": "Built-in simulated-internet responder configuration. h2-grpc-replay is experimental and answers configured gRPC methods without contacting the real service.",
+          "properties": {
+            "type": {
+              "enum": ["builtin", "h2-grpc-replay"],
+              "default": "builtin"
+            },
+            "unary_methods": {
+              "type": "array",
+              "description": "Method-name substrings to treat as unary gRPC calls. Matching is byte-substring based on HTTP/2 header blocks.",
+              "items": { "type": "string", "minLength": 1 },
+              "default": []
+            },
+            "streaming_methods": {
+              "type": "array",
+              "description": "Method-name substrings to treat as streaming gRPC calls. Matching is byte-substring based on HTTP/2 header blocks.",
+              "items": { "type": "string", "minLength": 1 },
+              "default": []
+            },
+            "unary_response_hex": {
+              "type": "string",
+              "pattern": "^([0-9A-Fa-f]{2})*$",
+              "description": "Uncompressed protobuf response body for unary calls, encoded as hex. Empty string sends an empty protobuf message.",
+              "default": ""
+            },
+            "stream_initial_response_hex": {
+              "type": "string",
+              "pattern": "^([0-9A-Fa-f]{2})*$",
+              "description": "Uncompressed protobuf response body for the first message on a configured streaming call.",
+              "default": ""
+            },
+            "stream_response_hex": {
+              "type": "string",
+              "pattern": "^([0-9A-Fa-f]{2})*$",
+              "description": "Uncompressed protobuf response body for later messages on a configured streaming call.",
+              "default": ""
+            },
+            "idle_timeout_s": {
+              "type": "number",
+              "minimum": 1,
+              "default": 30
+            },
+            "server_pings": {
+              "type": "boolean",
+              "default": true
+            },
+            "record_payloads": {
+              "type": "boolean",
+              "description": "Record bounded previews of inbound gRPC DATA payloads in sink interaction events. Useful for protocol diagnosis; keep false for minimal evidence.",
+              "default": false
+            },
+            "payload_preview_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "description": "Maximum bytes retained per recorded gRPC payload preview.",
+              "default": 64
+            },
+            "payload_record_limit": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024,
+              "description": "Maximum number of gRPC payload preview records retained per sink interaction.",
+              "default": 32
+            },
+            "negative_feature_substrings": {
+              "type": "array",
+              "description": "Request payload byte-substrings that should receive a configured gRPC error instead of a normal replay response. This is useful when a real service rejects feature probes.",
+              "items": { "type": "string", "minLength": 1 },
+              "default": []
+            },
+            "negative_grpc_status": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "gRPC status code to send for negative_feature_substrings matches.",
+              "default": "5"
+            },
+            "negative_grpc_message": {
+              "type": "string",
+              "description": "gRPC message template for negative_feature_substrings matches. The literal {feature} is replaced with the matched substring.",
+              "default": "feature {feature} is not expected to exist in the server"
+            },
+            "listen_port": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "Optional fixed loopback port for the built-in sink. Use this with trace.tracer=none and hostname-to-loopback mapping when no ptrace redirection is available.",
+              "default": 0
+            }
+          },
+          "additionalProperties": false,
+          "default": { "type": "builtin" }
+        },
+        "extra_hosts": {
+          "type": "array",
+          "description": "Docker-only host-to-IP entries added to /etc/hosts with --add-host for controlled analyses that need deterministic name resolution without opening DNS.",
+          "items": {
+            "type": "object",
+            "required": ["host", "ip"],
+            "properties": {
+              "host": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+              "ip": { "type": "string", "pattern": "^[0-9A-Fa-f:.]+$" }
+            },
+            "additionalProperties": false
+          },
+          "default": []
+        }
+      },
+      "default": {}
+    },
+    "files": {
+      "type": "object",
+      "description": "Filesystem provisioning and decoys.",
+      "properties": {
+        "work_mount": { "type": ["string", "null"], "description": "Host directory mounted read-write at cwd; sample files dropped here.", "default": null },
+        "read_only_mounts": {
+          "type": "array",
+          "description": "Additional host paths mounted read-only by DockerRuntime for dependency trees, config bundles, or fixtures. LocalRuntime ignores this because it already runs on the host filesystem.",
+          "items": {
+            "type": "object",
+            "required": ["source", "target"],
+            "properties": {
+              "source": { "type": "string", "description": "Existing host file or directory." },
+              "target": { "type": "string", "pattern": "^/", "description": "Absolute in-container mount path." }
+            },
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "decoys": {
+          "type": "array",
+          "description": "Canary files (relative to work_mount) planted to trip ransomware/stealer behavior; access is a high-signal event.",
+          "items": { "type": "string" },
+          "default": []
+        }
+      },
+      "default": {}
+    },
+    "trace": {
+      "type": "object",
+      "description": "Tracing configuration.",
+      "properties": {
+        "tracer": {
+          "enum": ["ptrace", "none"],
+          "default": "ptrace",
+          "description": "ptrace records syscall-level behavior and redirects simulated egress. none launches the specimen directly for low-overhead benchmarks; combine with Docker --network none, hostname-to-loopback mapping, and a fixed sink listen_port."
+        },
+        "l1": {
+          "type": "array",
+          "description": "Always-on L1 syscall/event classes to record.",
+          "items": { "enum": ["net", "file", "proc", "mmap", "signal", "time", "random", "ptrace"] },
+          "default": ["net", "file", "proc", "mmap", "signal"]
+        },
+        "snapshot_on": {
+          "type": "array",
+          "description": "Triggers that capture a memory snapshot. The gate value is reserved for future live-decision events and accepted for forward compatibility; the current tracer emits the other triggers.",
+          "items": { "enum": ["connect", "mmap+x", "exec", "decoy", "gate", "exit"] },
+          "default": ["connect", "mmap+x", "exec"]
+        },
+        "snapshot_every_ms": { "type": "integer", "minimum": 0, "default": 0, "description": "Periodic snapshot interval in ms; 0 = triggers only." },
+        "l2": {
+          "type": "object",
+          "description": "Opt-in instruction-level tracing.",
+          "properties": {
+            "mode": { "enum": ["off", "singlestep", "unicorn"], "default": "off" },
+            "window": {
+              "type": "object",
+              "description": "Bound for L2 tracing. Exactly one bound kind is expected when mode != off.",
+              "properties": {
+                "addr_start": { "type": "string", "description": "Hex start address (0x...)." },
+                "addr_end": { "type": "string", "description": "Hex end address (0x...)." },
+                "time_ms": { "type": "integer", "minimum": 1, "description": "Trace for this many ms of specimen time." },
+                "until_io": { "type": "boolean", "description": "Trace until the next I/O syscall." }
+              },
+              "default": {}
+            }
+          },
+          "default": { "mode": "off" }
+        }
+      },
+      "default": {}
+    },
+    "detect": {
+      "type": "object",
+      "description": "Behavioral detection toggles (run over raw facts).",
+      "properties": {
+        "yara": { "type": "boolean", "default": true },
+        "iocs": { "type": "boolean", "default": true },
+        "heuristics": { "type": "boolean", "default": true },
+        "attack_tags": { "type": "boolean", "default": false, "description": "Map findings to MITRE ATT&CK technique ids." },
+        "yara_rules": { "type": "array", "items": { "type": "string" }, "description": "Paths to additional YARA rule files/dirs.", "default": [] }
+      },
+      "default": {}
+    },
+    "instrumentation": {
+      "type": "object",
+      "description": "Opt-in invasive runtime instrumentation. These features can perturb target behavior and must be called out in evidence.",
+      "properties": {
+        "tls_plaintext": {
+          "type": "object",
+          "description": "OpenSSL LD_PRELOAD instrumentation for TLS plaintext observation or experimental response replay. Replay mode fakes OpenSSL handshake/write/read behavior and is weaker evidence than protocol-faithful network emulation.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "provider": {
+              "enum": ["openssl-preload"],
+              "default": "openssl-preload",
+              "description": "Instrumentation provider. openssl-preload hooks OpenSSL symbols with LD_PRELOAD."
+            },
+            "mode": {
+              "enum": ["observe", "replay"],
+              "default": "observe",
+              "description": "observe records SSL_read/SSL_write plaintext while preserving real TLS calls. replay is experimental and returns synthetic SSL_read data while faking OpenSSL handshake/write success."
+            },
+            "output": {
+              "type": ["string", "null"],
+              "description": "Path, as seen by the specimen, for JSONL plaintext capture output. Defaults to tls_plaintext_capture.log in the work directory.",
+              "default": null
+            },
+            "max_bytes_per_record": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536,
+              "default": 4096
+            },
+            "replay_file": {
+              "type": ["string", "null"],
+              "description": "Host-side transcript file for replay mode. Lines may be hex strings or JSONL records with direction=in and a hex field.",
+              "default": null
+            },
+            "fake_handshake": {
+              "type": "boolean",
+              "default": false,
+              "description": "Experimental replay fallback. When true, the shim fakes OpenSSL handshake success instead of using a real local TLS/MITM handshake. This is highly invasive and lower-fidelity."
+            },
+            "libssl": {
+              "type": ["string", "null"],
+              "description": "Optional in-process path to an already-loaded private libssl.so.3 used when RTLD_NEXT cannot resolve OpenSSL symbols.",
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "default": {}
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Runtime-side helper commands executed inside the same namespace as the specimen. Use these for local services required by a batch run; setup commands run before the specimen, teardown commands run afterward.",
+      "properties": {
+        "setup_commands": {
+          "type": "array",
+          "description": "Shell commands run before the specimen starts. A non-zero exit code aborts the specimen run.",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "teardown_commands": {
+          "type": "array",
+          "description": "Shell commands run after the specimen exits or setup fails. Non-zero exit codes are logged but do not replace the specimen exit code.",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "command_shell": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute shell path used for setup and teardown commands.",
+          "default": "/bin/sh"
+        },
+        "command_timeout_s": {
+          "type": "number",
+          "minimum": 1,
+          "description": "Per-command timeout in seconds for setup and teardown commands.",
+          "default": 30
+        },
+        "docker_reuse_container": {
+          "type": "boolean",
+          "description": "DockerRuntime-only no-trace mode. When true, execute this run in a long-lived matching container with docker exec instead of starting a fresh docker run.",
+          "default": false
+        },
+        "docker_reuse_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$",
+          "description": "Stable key for the reusable Docker container. Policies with incompatible mounts or network settings recreate the keyed container.",
+          "default": "default"
+        },
+        "docker_user": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]*)?$",
+          "description": "DockerRuntime-only user passed to docker run/exec via --user, for example '1000:1000'. Null or empty means Docker's image default user.",
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "default": {}
+    },
+    "report": {
+      "type": "object",
+      "description": "Post-hoc reporting and evidence assertions. Assertions are evaluated by summarize/reporting commands after the run; they never alter specimen execution.",
+      "properties": {
+        "assertions": {
+          "type": "array",
+          "description": "Reusable evidence checks evaluated against summary metrics such as network.remote_endpoint_event_count, artifacts.names, or exit_code.",
+          "items": {
+            "type": "object",
+            "required": ["subject", "op"],
+            "properties": {
+              "id": { "type": "string", "description": "Stable assertion identifier." },
+              "title": { "type": "string", "description": "Human-readable purpose." },
+              "subject": { "type": "string", "description": "Metric or summary dot path." },
+              "op": {
+                "enum": [
+                  "eq", "ne", "gt", "gte", "lt", "lte", "between",
+                  "in", "not_in", "contains", "not_contains",
+                  "contains_any", "contains_all", "exists", "not_exists",
+                  "is_empty", "is_not_empty", "any_match", "none_match", "all_match"
+                ]
+              },
+              "value": {
+                "description": "Expected value. Type depends on op; match ops accept one pattern or a list of patterns."
+              },
+              "match": {
+                "enum": ["glob", "regex", "exact"],
+                "default": "glob",
+                "description": "Pattern mode for any_match, none_match, and all_match."
+              },
+              "severity": {
+                "enum": ["info", "low", "medium", "high", "critical"],
+                "default": "high",
+                "description": "Severity assigned if the assertion fails."
+              }
+            },
+            "additionalProperties": true
+          },
+          "default": []
+        }
+      },
+      "default": {}
+    },
+    "kill_on": {
+      "type": "array",
+      "description": "Conditions that auto-terminate the run.",
+      "items": { "enum": ["egress_violation", "oom", "timeout", "decoy_write", "pids_exceeded", "manual"] },
+      "default": ["egress_violation", "oom", "timeout"]
+    }
+  }
+}

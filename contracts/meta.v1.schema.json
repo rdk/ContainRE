@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://containre.dev/contracts/meta.v1.schema.json",
+  "title": "ContainRE run metadata (v1)",
+  "description": "Per-run meta.json: the durable descriptor a reader loads first to understand a run. Additive-only within major version 1.",
+  "type": "object",
+  "required": ["schema_version", "run_id", "status", "specimen", "created_wall"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "run_id": { "type": "string", "description": "Opaque, filesystem-safe run identifier." },
+    "status": {
+      "enum": ["queued", "starting", "running", "paused", "finished", "killed", "error"],
+      "description": "Lifecycle state; live readers watch this."
+    },
+    "specimen": {
+      "type": "object",
+      "required": ["sha256"],
+      "properties": {
+        "path": { "type": "string", "description": "Original host path (informational)." },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size": { "type": "integer", "minimum": 0 },
+        "elf": {
+          "type": "object",
+          "description": "Static facts detected from the ELF; drives base-image/loader selection.",
+          "properties": {
+            "arch": { "type": "string", "description": "e.g. x86-64." },
+            "linkage": { "enum": ["static", "dynamic"] },
+            "libc": { "enum": ["glibc", "musl", "none", "unknown"] },
+            "interp": { "type": "string", "description": "Dynamic loader path, if any." },
+            "pie": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "image": { "type": ["string", "null"], "description": "Container image used for the specimen (null for the Local backend)." },
+    "runtime": { "type": "string", "description": "Runtime backend, e.g. docker.", "default": "docker" },
+    "policy_ref": { "type": "string", "description": "Relative path to the effective policy (policy.yaml).", "default": "policy.yaml" },
+    "created_wall": { "type": "integer", "description": "Unix wall-clock (ns) when the run was created." },
+    "started_wall": { "type": "integer", "description": "Unix wall-clock (ns) at specimen start." },
+    "stopped_wall": { "type": "integer", "description": "Unix wall-clock (ns) at specimen stop." },
+    "exit_code": { "type": ["integer", "null"] },
+    "kill_reason": {
+      "enum": ["egress_violation", "oom", "timeout", "decoy_write", "pids_exceeded", "manual", null],
+      "description": "Set when status=killed."
+    },
+    "counts": {
+      "type": "object",
+      "description": "Rolling tallies for quick overview rendering.",
+      "properties": {
+        "events": { "type": "integer", "minimum": 0 },
+        "snapshots": { "type": "integer", "minimum": 0 },
+        "checkpoints": { "type": "integer", "minimum": 0 },
+        "detections": { "type": "integer", "minimum": 0 },
+        "artifacts": { "type": "integer", "minimum": 0 },
+        "net_flows": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "description": "Highest-signal summary; heuristic, not authoritative.",
+      "properties": {
+        "max_severity": { "enum": ["info", "low", "medium", "high", "critical"] },
+        "attack": { "type": "array", "items": { "type": "string" } },
+        "flags": { "type": "array", "items": { "type": "string" }, "description": "e.g. anti-debug, code-injection, egress-attempt, decoy-hit." }
+      }
+    },
+    "host": {
+      "type": "object",
+      "description": "Environment the run executed in (reproducibility + support).",
+      "properties": {
+        "kernel": { "type": "string" },
+        "docker": { "type": "string" },
+        "criu": { "type": ["string", "null"], "description": "CRIU version, or null if unavailable/disabled." },
+        "containre": { "type": "string", "description": "ContainRE version." }
+      }
+    }
+  }
+}

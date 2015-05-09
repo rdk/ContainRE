@@ -1,0 +1,201 @@
+"""Behavioral detectors (SPEC §13). Each consumes the event stream and emits
+`detection` payload dicts (contracts/events.v1.schema.json §detection).
+
+These are event-stream heuristics. Byte-oriented scanners such as YARA run from
+RunSession over memory snapshots and captured dropped-file artifacts.
+"""
+from __future__ import annotations
+
+
+def _refs(**kw) -> dict:
+    """Build a detection.refs dict, omitting keys whose value is absent (the schema
+    requires strings, not nulls, for optional refs)."""
+    return {k: v for k, v in kw.items() if v is not None}
+
+
+class _Base:
+    name = "base"
+
+    def feed(self, event: dict) -> list[dict]:
+        return []
+
+    def close(self) -> list[dict]:
+        return []
+
+
+class DecoyDetector(_Base):
+    """A specimen touching a planted canary file is high-signal (ransomware/stealer)."""
+    name = "decoy"
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+
+    def feed(self, event: dict) -> list[dict]:
+        if event.get("kind") != "file":
+            return []
+        d = event["data"]
+        # Only tampering with a decoy is alarming; a bare open is left as a plain
+        # file event (visible, but not a detection).
+        if not d.get("decoy") or d.get("op") not in ("write", "unlink", "rename", "chmod"):
+            return []
+        path = d.get("path", "")
+        if path in self._seen:
+            return []
+        self._seen.add(path)
+        return [{
+            "detector": "heuristic",
+            "id": "decoy-access",
+            "severity": "critical",
+            "title": f"Decoy file {d.get('op')}: {path}",
+            "description": "Specimen accessed a planted canary file - strong ransomware/stealer signal.",
+            "refs": _refs(seq=event["seq"], artifact_id=d.get("artifact_id")),
+            "iocs": [{"type": "path", "value": path}],
+            "attack": ["T1657"],
+        }]
+
+
+class EgressDetector(_Base):
+    """Any outbound network attempt (allowed, blocked, or simulated) is worth flagging."""
+    name = "egress"
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+
+    def feed(self, event: dict) -> list[dict]:
+        if event.get("kind") != "net":
+            return []
+        d = event["data"]
+        op = d.get("op")
+        if op in ("connect", "send") and d.get("raddr"):
+            raddr = d["raddr"]
+            if raddr in self._seen:
+                return []
+            self._seen.add(raddr)
+            handled = d.get("decision") in ("block", "simulated")
+            ip = raddr.rsplit(":", 1)[0].strip("[]")
+            return [{
+                "detector": "ioc",
+                "id": "network-egress",
+                "severity": "medium",
+                "title": f"Network egress attempt to {raddr} ({d.get('decision')})",
+                "description": "Specimen attempted an outbound connection."
+                               + (" Contained by policy." if handled else " Allowed by policy."),
+                "refs": _refs(seq=event["seq"], flow_id=d.get("flow_id")),
+                "iocs": [{"type": "ip", "value": ip}],
+                "attack": ["T1071"],
+            }]
+        if op == "http" and d.get("http"):
+            h = d["http"]
+            host, path = h.get("host", ""), h.get("path", "")
+            key = f"http:{host}{path}"
+            if key in self._seen:
+                return []
+            self._seen.add(key)
+            iocs = []
+            if host:
+                iocs.append({"type": "domain", "value": host})
+                iocs.append({"type": "url", "value": f"http://{host}{path}"})
+            return [{
+                "detector": "ioc",
+                "id": "http-request",
+                "severity": "medium",
+                "title": f"HTTP {h.get('method')} {host}{path}",
+                "description": "Specimen issued an HTTP request (captured by the simulated-internet sink).",
+                "refs": _refs(seq=event["seq"]),
+                "iocs": iocs,
+                "attack": ["T1071.001"],
+            }]
+        return []
+
+
+class AntiDebugDetector(_Base):
+    """Specimen calling ptrace()/process_vm_* itself is a classic anti-analysis tell."""
+    name = "anti-debug"
+
+    def __init__(self) -> None:
+        self._fired = False
+
+    def feed(self, event: dict) -> list[dict]:
+        if self._fired or event.get("kind") != "syscall":
+            return []
+        if event["data"].get("name") not in ("ptrace", "process_vm_writev", "process_vm_readv"):
+            return []
+        self._fired = True
+        return [{
+            "detector": "heuristic",
+            "id": "anti-debug",
+            "severity": "medium",
+            "title": "Anti-analysis syscall used",
+            "description": f"Specimen invoked {event['data'].get('name')} - anti-debug or injection.",
+            "refs": _refs(seq=event["seq"]),
+            "attack": ["T1622", "T1055"],
+        }]
+
+
+class InjectionDetector(_Base):
+    """Mapping/mprotecting memory as executable can indicate unpacking or injection."""
+    name = "injection"
+
+    def __init__(self) -> None:
+        self._count = 0
+
+    def feed(self, event: dict) -> list[dict]:
+        if event.get("kind") != "mem":
+            return []
+        d = event["data"]
+        perms = d.get("region", {}).get("perms", "")
+        if "x" not in perms or d.get("op") != "protect":
+            return []
+        self._count += 1
+        if self._count != 1:
+            return []
+        return [{
+            "detector": "heuristic",
+            "id": "rwx-memory",
+            "severity": "low",
+            "title": "Executable memory created at runtime",
+            "description": "Specimen made memory executable via mprotect - unpacking/JIT/injection.",
+            "refs": _refs(seq=event["seq"], addr=d.get("addr")),
+            "attack": ["T1055", "T1027"],
+        }]
+
+
+class SensitiveFileDetector(_Base):
+    """Reading credential/secret files is a stealer/priv-esc signal. We deliberately
+    do NOT flag world-readable /etc/passwd (too common); only high-value secrets."""
+    name = "sensitive-file"
+
+    EXACT = {"/etc/shadow", "/etc/gshadow", "/etc/sudoers"}
+    SUBSTR = ("id_rsa", "id_ed25519", "/.ssh/", ".aws/credentials", "/.gnupg/",
+              ".docker/config.json", "/proc/self/mem")
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+
+    def feed(self, event: dict) -> list[dict]:
+        if event.get("kind") != "file":
+            return []
+        d = event["data"]
+        if d.get("op") not in ("open", "read"):
+            return []
+        path = d.get("path", "")
+        if path in self._seen:
+            return []
+        if not (path in self.EXACT or any(s in path for s in self.SUBSTR)):
+            return []
+        self._seen.add(path)
+        return [{
+            "detector": "heuristic",
+            "id": "sensitive-file-access",
+            "severity": "high",
+            "title": f"Access to sensitive file: {path}",
+            "description": "Specimen opened a credential/secret file.",
+            "refs": _refs(seq=event["seq"]),
+            "iocs": [{"type": "path", "value": path}],
+            "attack": ["T1552", "T1005"],
+        }]
+
+
+def default_detectors() -> list[_Base]:
+    return [DecoyDetector(), EgressDetector(), AntiDebugDetector(),
+            InjectionDetector(), SensitiveFileDetector()]

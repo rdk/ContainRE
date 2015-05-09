@@ -1,0 +1,21 @@
+# ContainRE sandbox+runner image: an Ubuntu base (matching typical host glibc so
+# dynamically-linked specimens run) with Python, python-ptrace, and the containre
+# package. The in-container probe-agent (containre.tracer.runner) drives the trace.
+#
+# Build (from repo root):
+#   docker build -t containre/runner:0.1 -f images/Dockerfile.runner .
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip ca-certificates libssl3 \
+    && pip3 install --no-cache-dir --break-system-packages \
+        python-ptrace pyyaml jsonschema typer capstone unicorn yara-python cryptography \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY containre/ /opt/containre/containre/
+COPY contracts/ /opt/containre/contracts/
+ENV PYTHONPATH=/opt/containre
+ENV CONTAINRE_CONTRACTS_DIR=/opt/containre/contracts
+
+WORKDIR /work
