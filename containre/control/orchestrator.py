@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -26,6 +27,12 @@ _TERMINAL = {"finished", "killed", "error"}
 
 
 def default_runs_root() -> Path:
+    # SPEC §9 documents the runs root as overridable via CONTAINRE_RUNS_ROOT.
+    # Honor it here so the CLI (ls/show/run) and the API/webapp agree on the
+    # location instead of splitting between $CONTAINRE_RUNS_ROOT and ~/.containre.
+    env = os.environ.get("CONTAINRE_RUNS_ROOT")
+    if env:
+        return Path(env)
     return Path.home() / ".containre" / "runs"
 
 
