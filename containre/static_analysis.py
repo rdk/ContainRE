@@ -76,7 +76,10 @@ def _sha256(path: Path, *, max_bytes: int = 256 * 1024 * 1024) -> str | None:
 
 def _is_elf(path: Path) -> bool:
     try:
-        return path.is_file() and path.read_bytes()[:4] == b"\x7fELF"
+        if not path.is_file():
+            return False
+        with path.open("rb") as fh:
+            return fh.read(4) == b"\x7fELF"   # read only the magic, not the whole file
     except OSError:
         return False
 
@@ -85,7 +88,8 @@ def _is_text(path: Path) -> bool:
     if path.suffix in TEXT_SUFFIXES:
         return True
     try:
-        data = path.read_bytes()[:4096]
+        with path.open("rb") as fh:
+            data = fh.read(4096)   # read only a prefix; avoid loading a huge file
     except OSError:
         return False
     return b"\x00" not in data
