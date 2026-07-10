@@ -146,7 +146,14 @@ def _symbol_matches(name: str | None, query: str) -> bool:
         return False
     q = normalize_symbol(query).lower()
     n = normalize_symbol(name).lower()
-    return q == n or query.lower() in str(name).lower() or q in n
+    if not q:
+        return False
+    if q == n:
+        return True
+    # Word-boundary (not arbitrary substring) match: 'connect' still matches
+    # '::connect' and 'push_back' matches 'std::vector<int>::push_back', but it no
+    # longer folds reconnect/disconnect/connector into the caller/callee evidence.
+    return re.search(r"(?<!\w)" + re.escape(q) + r"(?!\w)", n) is not None
 
 
 def _readelf_symbols(path: Path, rel_file: str) -> tuple[list[dict[str, Any]], list[str]]:
