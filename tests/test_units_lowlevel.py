@@ -18,6 +18,14 @@ from containre.store import RunStore
 from containre.tracer import l2, syscalls as sc
 
 
+def test_validate_warns_when_contracts_missing(monkeypatch):
+    import containre.contracts as c
+    monkeypatch.setattr(c, "load_schema", lambda name: None)   # simulate no contracts dir
+    c._warned_no_schema = False
+    with pytest.warns(RuntimeWarning):
+        assert c.validate({"anything": 1}, "policy.v1.schema.json") == []
+
+
 def test_emitted_net_ops_and_protos_conform():
     if contracts.find_contracts_dir() is None:
         pytest.skip("contracts dir not found")
