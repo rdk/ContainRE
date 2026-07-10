@@ -33,6 +33,7 @@ from . import syscalls as sc
 from .l2_engine import L2Engine
 
 _MASK = (1 << 64) - 1
+_PTRACE_O_EXITKILL = 0x00100000  # kernel SIGKILLs the tracee if the tracer dies
 
 # Event kind -> the trace.l1 class that decides whether it is recorded. Kinds not
 # listed (instr, detection, mem snapshots, ...) are always recorded.
@@ -273,6 +274,17 @@ class PtraceTracer(L2Engine):
         try:
             process.setreg(SYSCALL_REGISTER, _MASK)  # orig_rax = -1 -> kernel skips syscall
             self._pending_block[process.pid] = errno
+        except Exception:
+            pass
+
+    def _enable_exitkill(self, process) -> None:
+        """Set PTRACE_O_EXITKILL so the kernel SIGKILLs this tracee if the tracer
+        dies (crash, or SIGTERM/SIGKILL of the runner via LocalRuntime.stop).
+        python-ptrace never sets it, so otherwise a stopped specimen would be
+        detached and resumed - escaping containment. Guarded: EXITKILL is a
+        no-op-if-unsupported best effort (Linux 3.8+), never fatal to the trace."""
+        try:
+            process.setoptions(self.debugger.options | _PTRACE_O_EXITKILL)
         except Exception:
             pass
 
@@ -859,6 +871,7 @@ class PtraceTracer(L2Engine):
         except Exception:
             pass
         process = debugger.addProcess(pid, is_attached=True)
+        self._enable_exitkill(process)
 
         options = FunctionCallOptions(write_types=False, write_argname=False)
         wd = threading.Thread(target=self._watchdog, daemon=True)
@@ -889,6 +902,7 @@ class PtraceTracer(L2Engine):
                     continue
                 except NewProcessEvent as ev:
                     child = ev.process
+                    self._enable_exitkill(child)   # children must die with the tracer too
                     parent = child.parent
                     if parent is not None:
                         self._inherit_process_state(parent.pid, child.pid)
