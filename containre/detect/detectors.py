@@ -196,6 +196,22 @@ class SensitiveFileDetector(_Base):
         }]
 
 
-def default_detectors() -> list[_Base]:
-    return [DecoyDetector(), EgressDetector(), AntiDebugDetector(),
-            InjectionDetector(), SensitiveFileDetector()]
+def default_detectors(detect: dict | None = None) -> list[_Base]:
+    """Build the enabled detector set from the policy detect config.
+
+    detect.heuristics gates the behavioral heuristics (decoy/anti-debug/rwx/
+    sensitive-file); detect.iocs gates the network-egress IOC detector. Both
+    default on. (detect.attack_tags is applied downstream in RunSession, which
+    strips ATT&CK tags from recorded detections when disabled.)
+    """
+    detect = detect or {}
+    heuristics = detect.get("heuristics", True)
+    iocs = detect.get("iocs", True)
+    dets: list[_Base] = []
+    if heuristics:
+        dets.append(DecoyDetector())
+    if iocs:
+        dets.append(EgressDetector())
+    if heuristics:
+        dets += [AntiDebugDetector(), InjectionDetector(), SensitiveFileDetector()]
+    return dets

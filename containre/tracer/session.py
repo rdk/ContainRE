@@ -27,11 +27,12 @@ class RunSession:
         self.policy = policy
         self.workdir = workdir
         self.store = RunStore(run_dir)
-        self.detectors = default_detectors()
+        detect_cfg = policy.get("detect", {})
+        self.detectors = default_detectors(detect_cfg)
+        self.attack_tags = bool(detect_cfg.get("attack_tags", False))
         self.verdict = Verdict()
         self.net_flows: set[str] = set()
         self.written_files: set[str] = set()
-        detect_cfg = policy.get("detect", {})
         self.yara = (YaraScanner(detect_cfg.get("yara_rules", []))
                      if detect_cfg.get("yara", True) else None)
         # The tracer emits from the main thread; the net-sink from worker threads.
@@ -56,6 +57,11 @@ class RunSession:
                     self.record_detection(d, event.pid)
 
     def record_detection(self, d: dict, pid: int | None = None) -> None:
+        # detect.attack_tags (default off, per SPEC) gates the optional ATT&CK
+        # mapping: strip the detectors' attack arrays before they are recorded or
+        # folded into the verdict, so disabling the flag actually suppresses tags.
+        if not self.attack_tags and "attack" in d:
+            d = {k: v for k, v in d.items() if k != "attack"}
         with self._lock:
             self.store.write_event(Event(Kind.DETECTION, d, pid=pid))
             self.verdict.absorb(d)
