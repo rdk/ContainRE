@@ -49,6 +49,12 @@ def test_websocket_reports_unknown_run(tmp_path):
         assert msg["type"] == "error"
 
 
+def test_create_run_with_missing_binary_returns_400_not_500(tmp_path):
+    client = TestClient(create_app(runs_root=tmp_path / "runs", runtime_name="local"))
+    resp = client.post("/api/runs", json={"binary": str(tmp_path / "does-not-exist")})
+    assert resp.status_code == 400
+
+
 def test_websocket_rejects_malformed_since(tmp_path):
     runs = tmp_path / "runs"
     _terminal_run(runs, "run", 1)

@@ -92,7 +92,9 @@ def create_app(runs_root: Path | None = None, runtime_name: str | None = None,
             return JSONResponse(manager.start(policy), status_code=201)
         except CapacityError as exc:
             raise HTTPException(429, str(exc))
-        except FileNotFoundError as exc:
+        except (OSError, ValueError) as exc:
+            # OSError covers FileNotFoundError/PermissionError (unreadable specimen,
+            # unwritable work_mount); return a structured 400 rather than a 500.
             raise HTTPException(400, str(exc))
 
     @app.get("/api/runs")
