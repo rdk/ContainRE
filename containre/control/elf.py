@@ -39,22 +39,32 @@ def elf_facts(path: str | Path) -> dict:
         e_phentsize = struct.unpack_from(en + "H", data, 42)[0]
         e_phnum = struct.unpack_from(en + "H", data, 44)[0]
 
+    # Require the whole program header before unpacking its fields: the p_offset
+    # (off+16) and p_filesz (off+40) reads for ELF64 land past a mere off+8 guard,
+    # so a crafted/truncated PT_INTERP header raised struct.error out of the
+    # unwrapped callers (create_run, static analysis, CLI, API). try/except is a
+    # backstop for any other malformation.
+    hdr_size = 56 if is64 else 32
     interp = None
-    for i in range(e_phnum):
-        off = e_phoff + i * e_phentsize
-        if off + 8 > len(data):
+    try:
+        for i in range(e_phnum):
+            off = e_phoff + i * e_phentsize
+            if off < 0 or off + hdr_size > len(data):
+                break
+            p_type = struct.unpack_from(en + "I", data, off)[0]
+            if p_type != _PT_INTERP:
+                continue
+            if is64:
+                p_offset = struct.unpack_from(en + "Q", data, off + 8)[0]
+                p_filesz = struct.unpack_from(en + "Q", data, off + 32)[0]
+            else:
+                p_offset = struct.unpack_from(en + "I", data, off + 4)[0]
+                p_filesz = struct.unpack_from(en + "I", data, off + 16)[0]
+            p_filesz = min(int(p_filesz), 4096)  # interp path is short; bound the slice
+            interp = data[p_offset:p_offset + p_filesz].split(b"\x00", 1)[0].decode("utf-8", "replace")
             break
-        p_type = struct.unpack_from(en + "I", data, off)[0]
-        if p_type != _PT_INTERP:
-            continue
-        if is64:
-            p_offset = struct.unpack_from(en + "Q", data, off + 8)[0]
-            p_filesz = struct.unpack_from(en + "Q", data, off + 32)[0]
-        else:
-            p_offset = struct.unpack_from(en + "I", data, off + 4)[0]
-            p_filesz = struct.unpack_from(en + "I", data, off + 16)[0]
-        interp = data[p_offset:p_offset + p_filesz].split(b"\x00", 1)[0].decode("utf-8", "replace")
-        break
+    except (struct.error, ValueError):
+        pass
 
     if interp:
         facts["linkage"] = "dynamic"

@@ -98,6 +98,28 @@ def test_elf_facts_non_elf(tmp_path):
     assert facts["arch"] is None and facts["linkage"] == "unknown"
 
 
+def test_elf_facts_survives_truncated_program_header(tmp_path):
+    # 72-byte ELF64 claiming one 56-byte PT_INTERP program header at e_phoff=64,
+    # but the file is too short to hold it -> used to raise struct.error.
+    data = bytearray(72)
+    data[0:4] = b"\x7fELF"
+    data[4] = 2   # 64-bit
+    data[5] = 1   # little-endian
+    struct.pack_into("<H", data, 16, 2)     # e_type = ET_EXEC
+    struct.pack_into("<H", data, 18, 0x3E)  # e_machine = x86-64
+    struct.pack_into("<Q", data, 32, 64)    # e_phoff = 64
+    struct.pack_into("<H", data, 54, 56)    # e_phentsize
+    struct.pack_into("<H", data, 56, 1)     # e_phnum = 1
+    struct.pack_into("<I", data, 64, 3)     # p_type = PT_INTERP (only 8 bytes remain)
+    p = tmp_path / "evil.bin"
+    p.write_bytes(bytes(data))
+
+    facts = elf_facts(p)   # must not raise
+
+    assert facts["arch"] == "x86-64"
+    assert facts["linkage"] in ("static", "dynamic", "unknown")
+
+
 # -- memory snapshot I/O ---------------------------------------------------
 def _blob(tmp_path):
     header = {"pid": 7, "regions": [
