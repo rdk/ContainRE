@@ -233,12 +233,15 @@ def create_app(runs_root: Path | None = None, runtime_name: str | None = None,
         try:
             page = 500
             while True:
-                res = manager.events(run_id, since=since, limit=page)
+                # manager.events()/get() re-read and JSON-parse the run's files;
+                # run them off the event loop so a chatty run can't stall the whole
+                # control plane (health, other streams) each poll.
+                res = await asyncio.to_thread(manager.events, run_id, since=since, limit=page)
                 for event in res["events"]:
                     await ws.send_json({"type": "event", "event": event})
                 since = res["next_seq"]
                 caught_up = len(res["events"]) < page   # a short page => backlog drained
-                meta = manager.get(run_id)
+                meta = await asyncio.to_thread(manager.get, run_id)
                 status = meta["status"] if meta else "error"
                 active = bool(meta and meta.get("active"))
                 await ws.send_json({"type": "status", "status": status, "active": active})
