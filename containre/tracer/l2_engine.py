@@ -2,7 +2,10 @@
 
 Holds the single-step window, the address-seek, and the Unicorn region driver.
 The host tracer provides: ``emit``, ``debugger``, ``_md`` (Capstone), ``_killed``,
-``l2_window``, ``l2_max_insns``, ``_l2_windows``, and ``_on_process_exit``.
+``l2_window``, ``l2_max_insns``, ``_l2_windows``, ``_on_process_exit``, and -- for
+the in-window egress gate -- ``net_posture``, ``_read_addr``,
+``_read_msghdr_addr``, ``_read_mmsghdr_addr``, ``_net_decision`` and
+``_request_kill``.
 """
 from __future__ import annotations
 

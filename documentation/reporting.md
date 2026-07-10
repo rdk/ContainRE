@@ -74,7 +74,7 @@ Subjects can reference summary metrics or simple dot paths. Useful metrics:
 | `network.dns_block_count` | Blocked remote events targeting port 53. |
 | `detections.count` | Number of detection events. |
 | `detections.ids` | Detection identifiers or titles. |
-| `detections.max_severity` | Maximum verdict severity. |
+| `detections.max_severity` | Highest severity across the detection events, reconciled with `meta.verdict` (whichever is stronger). |
 | `verdict.flags` | Verdict flags. |
 | `artifacts.count` | Captured artifact count. |
 | `artifacts.names` | Captured artifact relative names. |
