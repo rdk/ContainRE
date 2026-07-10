@@ -224,14 +224,18 @@ class L2Engine:
 
     def _seek_to(self, process, target: int, cap: int = 500000) -> str:
         """Single-step the live process until rip == target. Returns
-        'reached' | 'exited' | 'missed'."""
+        'reached' | 'exited' | 'missed'. A signal still pending when the seek
+        ends (reached/missed) is left in self._seek_pending_signal for the caller
+        to re-inject on resume, rather than being dropped."""
         pending_signal = 0
+        outcome = "missed"
         for _ in range(cap):
             if self._killed.is_set():
-                return "missed"
+                break
             try:
                 if process.getreg("rip") == target:
-                    return "reached"
+                    outcome = "reached"
+                    break
                 # Gate egress syscalls encountered while seeking, same as the
                 # single-step window, so the seek phase can't leak the network.
                 self._l2_gate_egress_at_rip(process)
@@ -239,9 +243,10 @@ class L2Engine:
                 pending_signal = 0
                 event = self.debugger.waitProcessEvent(pid=process.pid)
             except Exception:
-                return "missed"
+                break
             if isinstance(event, ProcessExit):
                 self._on_process_exit(event)
+                self._seek_pending_signal = 0   # process gone; nothing to deliver
                 return "exited"
             if isinstance(event, ProcessSignal) and event.signum not in (SIGTRAP, SIGTRAP | 0x80):
                 # Record and re-inject on the next step instead of swallowing it.
@@ -249,7 +254,8 @@ class L2Engine:
                                               "name": event.name or str(event.signum)},
                                 pid=process.pid))
                 pending_signal = event.signum
-        return "missed"
+        self._seek_pending_signal = pending_signal
+        return outcome
 
     def _unicorn_region(self, process) -> None:
         """Seed a Unicorn emulator from the live process at addr_start and emulate
@@ -274,9 +280,10 @@ class L2Engine:
                 int(win.get("max_insns", self.l2_max_insns)),
                 self.emit, self._md, window_id, pid=process.pid,
             )
-        # resume normal syscall tracing from wherever the live process is stopped
+        # resume normal syscall tracing from wherever the live process is stopped,
+        # re-injecting any signal the seek left pending (0 = none).
         try:
             process.syscall_state.clear()
-            process.syscall()
+            process.syscall(getattr(self, "_seek_pending_signal", 0))
         except Exception:
             pass
