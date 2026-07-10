@@ -110,7 +110,9 @@ def _run_runtime_commands(job: Job, session: RunSession, phase: str) -> tuple[in
             event["reason"] = reason
         session.emit(Event(Kind.PROC, event))
         if phase == "setup" and rc != 0:
-            return rc, f"setup command {idx} failed"
+            # Stable kill_reason token (meta.v1 enum); the failing command index
+            # is carried in the exec event emitted just above.
+            return rc, "setup_failed"
     return None, None
 
 
