@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from containre.model import Kind
+from containre.tracer import l2 as l2mod
 from containre.tracer import syscalls as sc
 from containre.tracer.ptrace_tracer import PtraceTracer
 
@@ -310,6 +311,49 @@ def test_disk_mb_parsed_and_workdir_bytes_short_circuits(tmp_path):
 def test_disk_mb_off_by_default():
     tracer, _ = _tracer()
     assert tracer.disk_mb == 0
+
+
+def test_on_enter_dispatches_sendmmsg_and_io_uring_to_the_egress_gate():
+    # The containment fixes only take effect via the _on_enter dispatch table;
+    # deleting an `elif name == ...` line would reintroduce the bypass. Drive
+    # _on_enter (not the handler methods) so the wiring itself is covered.
+    tracer, events = _tracer()
+    sockaddr = _sockaddr_in("203.0.113.30", 53)
+    proc = FakeProcess(reads={0x5000: _msghdr(0x6000, len(sockaddr)), 0x6000: sockaddr})
+    tracer._on_enter(proc, _syscall("sendmmsg", 3, 0x5000, 1, 0))
+    assert events and events[-1].data["raddr"] == "203.0.113.30:53"
+    assert tracer._pending_block == {proc.pid: sc.ECONNREFUSED}
+
+    tracer2, events2 = _tracer(network={"posture": "deny", "allow": []})
+    proc2 = FakeProcess()
+    tracer2._on_enter(proc2, _syscall("io_uring_setup", 64, 0x1000))
+    assert events2[-1].data == {"name": "io_uring_setup", "phase": "enter", "blocked": True}
+    assert tracer2._pending_block == {proc2.pid: __import__("errno").ENOSYS}
+
+
+def test_l2_gate_egress_at_rip_neutralizes_a_syscall_instruction():
+    if not l2mod.have_capstone():
+        pytest.skip("capstone not available")
+    # The L2 seek gate decodes the instruction at rip and only acts on a real
+    # `syscall`; verify the decode->gate path (reverting the call site turns it
+    # into a no-op).
+    tracer, _ = _tracer(network={"posture": "deny", "allow": []})
+    tracer._md = l2mod.make_disassembler()
+    sockaddr = _sockaddr_in("203.0.113.5", 443)
+    proc = FakeProcess(
+        reads={0x1000: b"\x0f\x05" + b"\x90" * 13,   # `syscall` then padding
+               0x9000: sockaddr},
+        regvals={"rip": 0x1000, "rax": 42, "rsi": 0x9000, "rdx": len(sockaddr)},  # connect
+    )
+
+    tracer._l2_gate_egress_at_rip(proc)
+
+    assert proc.regvals["rax"] == (1 << 64) - 1   # blocked connect neutralized
+
+    # a non-syscall instruction at rip must NOT be gated
+    proc2 = FakeProcess(reads={0x2000: b"\x90" * 15}, regvals={"rip": 0x2000, "rax": 42})
+    tracer._l2_gate_egress_at_rip(proc2)
+    assert proc2.regvals["rax"] == 42
 
 
 def test_seek_to_carries_pending_signal_out_instead_of_dropping_it():
