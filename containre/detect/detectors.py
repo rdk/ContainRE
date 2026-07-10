@@ -144,7 +144,10 @@ class InjectionDetector(_Base):
             return []
         d = event["data"]
         perms = d.get("region", {}).get("perms", "")
-        if "x" not in perms or d.get("op") != "protect":
+        # mmap(PROT_EXEC) emits op='map' and mprotect emits op='protect'; the
+        # allocate-RWX-directly-via-mmap pattern (common shellcode/JIT loader) must
+        # count too, not just mprotect.
+        if "x" not in perms or d.get("op") not in ("map", "protect"):
             return []
         self._count += 1
         if self._count != 1:
@@ -154,7 +157,7 @@ class InjectionDetector(_Base):
             "id": "rwx-memory",
             "severity": "low",
             "title": "Executable memory created at runtime",
-            "description": "Specimen made memory executable via mprotect - unpacking/JIT/injection.",
+            "description": "Specimen made memory executable via mmap/mprotect - unpacking/JIT/injection.",
             "refs": _refs(seq=event["seq"], addr=d.get("addr")),
             "attack": ["T1055", "T1027"],
         }]
