@@ -89,6 +89,7 @@ inspectable after the fact.
 
 ## Test Support
 
-- Unit test script: `scripts/test-unit.sh`.
-- Extended local specimen script: `scripts/test-specimens-extended.sh`.
+- Test runner: `./run_tests.sh` — offline unit tests by default; `--integration`
+  adds the specimen/docker group (`--only-integration`, `--all`, `--no-docker`,
+  and `--no-build` refine the selection; extra args pass through to pytest).
 - Benign and safe suspicious-behavior specimens under [specimens/src](../specimens/src/).
