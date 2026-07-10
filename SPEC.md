@@ -322,14 +322,15 @@ Runs on raw facts (pluggable `Detector` interface):
 ## 14. CLI (thin client of the API)
 
 ```
-containre run <policy.yaml|binary> [--net deny|simulate|allow] [--l2 …] [--headless]
+containre run <policy.yaml|binary> [--net deny|simulate|allow] [--l2 …]
 containre watch <run_id>            # live tail of structured events
 containre ls | show <run_id> | summarize <run_id>
 containre serve                     # start control plane + webapp
 ```
 
-Headless `run` = pure flight recorder (policy-driven, reproducible). Everything the
-CLI does is an API call, so CLI and webapp behavior are identical.
+`run` is a pure flight recorder (always headless, policy-driven, reproducible):
+it executes the specimen to completion and records the run, without attaching a
+live UI.
 
 ---
 
