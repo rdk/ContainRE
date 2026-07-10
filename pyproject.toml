@@ -39,6 +39,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["containre"]
 
+# Ship the JSON-Schema contracts inside the wheel so a pip-installed package can
+# validate policies/events (contracts.find_contracts_dir looks in _contracts).
+[tool.hatch.build.targets.wheel.force-include]
+"contracts" = "containre/_contracts"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

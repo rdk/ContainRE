@@ -21,11 +21,28 @@ def find_contracts_dir() -> Path | None:
         if (p / "events.v1.schema.json").exists():
             return p
     here = Path(__file__).resolve()
-    for parent in [here.parent, *here.parents]:
-        candidate = parent / "contracts"
+    # Packaged location first (shipped inside the wheel), then the source tree.
+    candidates = [here.parent / "_contracts"]
+    candidates += [parent / "contracts" for parent in [here.parent, *here.parents]]
+    for candidate in candidates:
         if (candidate / "events.v1.schema.json").exists():
             return candidate
     return None
+
+
+_warned_no_schema = False
+
+
+def _warn_no_schema() -> None:
+    global _warned_no_schema
+    if not _warned_no_schema:
+        _warned_no_schema = True
+        import warnings
+        warnings.warn(
+            "ContainRE JSON-Schema contracts not found; policy/event validation is "
+            "DISABLED (malformed policies are accepted silently). Set "
+            "CONTAINRE_CONTRACTS_DIR or install a build that bundles contracts/.",
+            RuntimeWarning, stacklevel=3)
 
 
 @functools.lru_cache(maxsize=None)
@@ -43,6 +60,7 @@ def validate(instance, schema_name: str) -> list[str]:
     """Return a list of human-readable validation errors (empty = valid or no schema)."""
     schema = load_schema(schema_name)
     if schema is None:
+        _warn_no_schema()
         return []
     from jsonschema import Draft202012Validator
 
