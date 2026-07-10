@@ -198,19 +198,21 @@ Each run is a self-contained directory under the runs root - default
 
 ```
 ~/.containre/runs/<run_id>/
-  meta.json            # specimen hash, image, policy, start/stop, status, verdicts
-  policy.yaml          # exact effective policy (reproducibility)
-  events.jsonl         # ordered, append-only structured events (schema-versioned)
-  index.sqlite         # seek/filter/query index over events + artifacts
-  snapshots/*.zst      # memory region dumps
-  checkpoints/*        # CRIU images
-  instr/<window>.trace # L2 instruction traces
-  net/capture.pcap     # full packet capture
-  net/flows.jsonl      # structured connection/DNS/HTTP records
-  files/               # captured dropped/modified artifacts + decoy hits
-  detections.jsonl     # YARA/IOC/heuristic findings (+ optional ATT&CK tags)
-  console.log          # specimen stdout/stderr
+  meta.json                    # specimen hash, image, policy, start/stop, status, verdicts
+  policy.yaml                  # exact effective policy (reproducibility)
+  events.jsonl                 # ordered, append-only structured events (schema-versioned).
+                               #   Carries the net/file/proc/mem/signal/instr streams AND
+                               #   YARA/IOC/heuristic detections (kind=detection) inline.
+  index.sqlite                 # seek/filter/query index over events (rebuilt from the log on open)
+  snapshots/snap-<digest>.bin  # memory region dumps (.bin.zst when the `snapshots` extra is installed)
+  checkpoints/<name>.json      # CRIU checkpoint result metadata (the images live in the Docker daemon)
+  net/capture.pcap             # reconstructed packet capture from observed payloads
+  files/                       # captured dropped/modified artifacts + decoy hits
+  console.log                  # specimen stdout/stderr
 ```
+
+Detections, network flows, and L2 instruction traces are **not** separate files;
+they are carried in `events.jsonl` as `kind=detection`/`net`/`instr` records.
 
 - **Hot (live) path:** events streamed over WebSocket as they happen.
 - **Cold (durable) path:** same events appended to `events.jsonl`; `index.sqlite`
