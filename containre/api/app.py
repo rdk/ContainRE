@@ -218,7 +218,12 @@ def create_app(runs_root: Path | None = None, runtime_name: str | None = None,
     @app.websocket("/api/runs/{run_id}/stream")
     async def stream_ep(ws: WebSocket, run_id: str) -> None:
         await ws.accept()
-        since = int(ws.query_params.get("since", 0))
+        try:
+            since = max(0, int(ws.query_params.get("since", 0)))
+        except (TypeError, ValueError):
+            await ws.send_json({"type": "error", "message": "invalid 'since' query param"})
+            await ws.close()
+            return
         if manager.get(run_id) is None:
             await ws.send_json({"type": "error", "message": "no such run"})
             await ws.close()
