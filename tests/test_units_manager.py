@@ -59,6 +59,19 @@ def test_memory_returns_none_for_corrupt_snapshot(tmp_path):
     assert manager.memory("run", "snap-bad") is None   # 404, not a 500
 
 
+def test_memory_returns_none_for_region_without_base(tmp_path):
+    import json as _json
+    _write_meta(tmp_path, "run")
+    snap_dir = tmp_path / "run" / "snapshots"
+    snap_dir.mkdir()
+    # valid JSON header, but the region lacks a "base" key -> int(region["base"]) would raise
+    header = _json.dumps({"pid": 1, "regions": [{"dumped": 4}]}).encode()
+    (snap_dir / "snap-nb.bin").write_bytes(header + b"\ndata")
+    manager = RunManager(runs_root=tmp_path, max_concurrent=1)
+
+    assert manager.memory("run", "snap-nb") is None   # 404, not a 500
+
+
 def test_events_skips_malformed_lines(tmp_path):
     _write_meta(tmp_path, "run")
     (tmp_path / "run" / "events.jsonl").write_text(
