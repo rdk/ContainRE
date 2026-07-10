@@ -47,3 +47,12 @@ def test_websocket_reports_unknown_run(tmp_path):
     with client.websocket_connect("/api/runs/nope/stream") as ws:
         msg = ws.receive_json()
         assert msg["type"] == "error"
+
+
+def test_websocket_rejects_malformed_since(tmp_path):
+    runs = tmp_path / "runs"
+    _terminal_run(runs, "run", 1)
+    client = TestClient(create_app(runs_root=runs, runtime_name="local"))
+    with client.websocket_connect("/api/runs/run/stream?since=abc") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "error" and "since" in msg["message"]
