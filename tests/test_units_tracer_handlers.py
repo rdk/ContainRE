@@ -318,6 +318,30 @@ def test_disk_mb_off_by_default():
     assert tracer.disk_mb == 0
 
 
+def test_watchdog_kills_the_run_when_disk_budget_is_exceeded():
+    tracer, _ = _tracer(limits={"disk_mb": 1, "wallclock_s": 0})  # disk budget only
+    tracer.root_pid = 999999999
+    tracer._workdir_bytes = lambda limit: 5 * 1024 * 1024   # over the 1MB budget
+    killed = []
+    tracer._kill_root = lambda: killed.append(True)
+
+    # run exactly one watchdog iteration: first wait() returns False (proceed),
+    # then the disk check fires and _watchdog returns.
+    calls = {"n": 0}
+
+    class _Ev:
+        def wait(self, timeout):
+            calls["n"] += 1
+            return calls["n"] > 1
+
+    tracer._killed = _Ev()
+
+    tracer._watchdog()
+
+    assert tracer.kill_reason == "disk"
+    assert killed == [True]
+
+
 def test_on_enter_dispatches_sendmmsg_and_io_uring_to_the_egress_gate():
     # The containment fixes only take effect via the _on_enter dispatch table;
     # deleting an `elif name == ...` line would reintroduce the bypass. Drive
