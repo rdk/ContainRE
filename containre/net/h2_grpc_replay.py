@@ -44,18 +44,22 @@ def _record_bytes(line: str) -> tuple[str, bytes] | None:
     line = line.strip()
     if not line:
         return None
-    direction = ""
     try:
         row = json.loads(line)
     except json.JSONDecodeError:
-        return "", bytes.fromhex(line)
+        try:
+            return "", bytes.fromhex(line)
+        except ValueError:
+            return None   # not JSON and not a hex line: skip rather than crash
     if not isinstance(row, dict):
         return None
     raw_hex = row.get("hex") or row.get("data_hex")
     if not isinstance(raw_hex, str) or not raw_hex:
         return None
-    direction = str(row.get("direction") or "")
-    return direction, bytes.fromhex(raw_hex)
+    try:
+        return str(row.get("direction") or ""), bytes.fromhex(raw_hex)
+    except ValueError:
+        return None
 
 
 def _frames_from_capture(path: Path) -> tuple[list[H2Frame], list[str]]:
@@ -63,7 +67,13 @@ def _frames_from_capture(path: Path) -> tuple[list[H2Frame], list[str]]:
     warnings: list[str] = []
     connection = 0
     sequence = 0
-    for line_no, line in enumerate(path.read_text().splitlines(), 1):
+    try:
+        # errors='replace' so a binary / specimen-clobbered capture doesn't raise
+        # UnicodeDecodeError out of the CLI.
+        text = path.read_text(errors="replace")
+    except OSError as exc:
+        return [], [f"could not read capture {path}: {exc}"]
+    for line_no, line in enumerate(text.splitlines(), 1):
         record = _record_bytes(line)
         if record is None:
             continue
