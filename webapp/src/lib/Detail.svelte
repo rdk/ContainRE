@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, stream, pcapExists, type Ev } from './api';
+  import { api, stream, pcapExists, type Ev, type Stream } from './api';
   import MemoryView from './MemoryView.svelte';
   import StaticView from './StaticView.svelte';
 
@@ -16,7 +16,8 @@
   let hasPcap = $state(false);
   let checkpoints = $state<any[]>([]);
   let cpMsg = $state('');
-  let ws: WebSocket | null = null;
+  let streamErr = $state('');
+  let ws: Stream | null = null;
 
   const detections = $derived(events.filter((e) => e.kind === 'detection'));
   const instrs = $derived(events.filter((e) => e.kind === 'instr'));
@@ -50,12 +51,13 @@
     ws = stream(id, 0,
       (e) => { events = [...events, e]; },
       (s, a) => {
-        status = s; active = a;
+        status = s; active = a; streamErr = '';
         if (['finished', 'killed', 'error'].includes(s) && !a) {
           api.run(id).then((m) => (meta = m)).catch(() => {});
           loadFiles();
         }
-      });
+      },
+      (msg) => { streamErr = msg; });
     loadFiles();
   });
   onDestroy(() => ws?.close());
@@ -88,6 +90,7 @@
     <button class="cp" onclick={doCheckpoint} title="CRIU checkpoint - docker runtime, best-effort">⚑ checkpoint</button>
   </div>
   {#if cpMsg}<div class="dim cpmsg">{cpMsg}</div>{/if}
+  {#if streamErr}<div class="dim cpmsg">stream: {streamErr}</div>{/if}
 
   {#if meta?.verdict}
     <div class="verdict">

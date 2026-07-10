@@ -31,18 +31,54 @@ export const api = {
     J(`/api/runs/${id}/static/query?symbol=${encodeURIComponent(symbol)}&direction=${direction}&refresh=${refresh}&limit=${limit}`),
 };
 
+export type Stream = { close: () => void };
+
+const TERMINAL = ['finished', 'killed', 'error'];
+
+// Resilient live stream: reconnects (resuming from the last seq via ?since=) if
+// the socket drops mid-run, guards JSON.parse, and surfaces {type:'error'}
+// frames. Stops reconnecting once the run reaches a terminal, inactive status so
+// a finished run doesn't loop.
 export function stream(
   id: string, since: number,
   onEvent: (e: Ev) => void, onStatus: (s: string, active: boolean) => void,
-): WebSocket {
+  onError?: (msg: string) => void,
+): Stream {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/api/runs/${id}/stream?since=${since}`);
-  ws.onmessage = (m) => {
-    const msg = JSON.parse(m.data);
-    if (msg.type === 'event') onEvent(msg.event);
-    else if (msg.type === 'status') onStatus(msg.status, msg.active);
-  };
-  return ws;
+  let lastSeq = since - 1;
+  let closed = false;
+  let done = false;
+  let retry = 0;
+  let ws: WebSocket | null = null;
+
+  function connect() {
+    if (closed || done) return;
+    ws = new WebSocket(`${proto}://${location.host}/api/runs/${id}/stream?since=${lastSeq + 1}`);
+    ws.onmessage = (m) => {
+      let msg: any;
+      try { msg = JSON.parse(m.data); } catch { return; }
+      if (msg.type === 'event') {
+        if (typeof msg.event?.seq === 'number') lastSeq = msg.event.seq;
+        onEvent(msg.event);
+      } else if (msg.type === 'status') {
+        retry = 0;
+        if (TERMINAL.includes(msg.status) && !msg.active) done = true;
+        onStatus(msg.status, msg.active);
+      } else if (msg.type === 'error') {
+        onError?.(msg.message ?? 'stream error');
+      }
+    };
+    ws.onclose = () => {
+      if (closed || done) return;
+      const delay = Math.min(1000 * 2 ** retry, 15000);
+      retry += 1;
+      setTimeout(connect, delay);
+    };
+    ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
+  }
+
+  connect();
+  return { close() { closed = true; try { ws?.close(); } catch { /* ignore */ } } };
 }
 
 export async function pcapExists(id: string): Promise<boolean> {
