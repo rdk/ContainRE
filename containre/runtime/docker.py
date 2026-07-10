@@ -20,10 +20,17 @@ import json
 import re
 import shutil
 import subprocess
+import warnings
 from pathlib import Path
 
 from ..control.instrumentation import configure_tls_plaintext
 from ..interfaces import Job, RunHandle
+
+
+class HostNetworkingWarning(UserWarning):
+    """Raised when a run uses docker_network=host, which removes network-namespace
+    isolation - the specimen shares the host loopback/interfaces and is contained
+    only by the ptrace egress allowlist."""
 
 _IMAGE = "containre/runner:0.1"
 _REPO = Path(__file__).resolve().parents[2]
@@ -80,6 +87,16 @@ class DockerRuntime:
                 raise DockerError("network.docker_network=host requires a non-empty "
                                   "network.allow and posture other than allow")
             self._require_tracer_for_networking(tracer, "network.docker_network=host")
+            # Host networking shares the host loopback/interfaces with the
+            # specimen: the unauthenticated control plane (127.0.0.1) and any
+            # host-local/LAN service become reachable, contained ONLY by the
+            # ptrace egress allowlist. Make that trade-off explicit.
+            warnings.warn(
+                "network.docker_network=host removes network-namespace isolation - "
+                "the specimen shares the host loopback (including the unauthenticated "
+                "control plane) and LAN, restrained only by the ptrace egress "
+                "allowlist. Prefer bridge networking with an allowlist.",
+                HostNetworkingWarning, stacklevel=2)
             return ["--network", "host"]
         if docker_network not in ("auto", "bridge"):
             raise DockerError(f"invalid network.docker_network: {docker_network!r}")

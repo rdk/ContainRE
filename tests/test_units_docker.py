@@ -40,3 +40,13 @@ def test_host_network_with_tracer_none_is_rejected():
             "network": {"posture": "deny", "allow": ["1.2.3.4:443"], "docker_network": "host"},
             "trace": {"tracer": "none"},
         })
+
+
+def test_host_network_warns_about_lost_isolation():
+    from containre.runtime.docker import HostNetworkingWarning
+    with pytest.warns(HostNetworkingWarning):
+        args = _rt()._network_args({
+            "network": {"posture": "deny", "allow": ["1.2.3.4:443"], "docker_network": "host"},
+            "trace": {"tracer": "ptrace"},
+        })
+    assert args == ["--network", "host"]
