@@ -249,8 +249,14 @@ trace:
   snapshot_every_ms: 0     # 0 = triggers only
   l2: { mode: off }        # off | singlestep | unicorn ; window: {addr|time|until_io}
 detect: { yara: true, iocs: true, heuristics: true, attack_tags: false }
-kill_on: [egress_violation, oom, timeout, decoy_write]
+kill_on: [egress_violation, oom, timeout]   # optional extras: decoy_write, pids_exceeded, manual
 ```
+
+`kill_on` triggers that the tracer observes — `egress_violation` (a blocked
+egress) and `decoy_write` (decoy tampering) — terminate the run when listed.
+`timeout` (wallclock) and the event cap are always-on safety limits regardless
+of `kill_on`. `oom`/`pids_exceeded` are enforced by the container's cgroup
+limits.
 
 The CLI and webapp can supply launch-time overrides; the effective policy is
 persisted to the run dir for reproducibility.
