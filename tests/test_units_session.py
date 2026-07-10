@@ -115,6 +115,19 @@ def test_capture_artifacts_ignores_paths_outside_workdir(tmp_path):
         session.store.close()
 
 
+def test_write_pcap_handles_more_flows_than_16bit_sport_range(tmp_path):
+    session, _ = _session(tmp_path)
+    # >25535 flows would push sport 40000+i past 65535 and raise struct.error,
+    # crashing run finalization before finalize()/capture_artifacts().
+    flows = {(0, i): {"raddr": "1.2.3.4:80", "chunks": [("out", b"x")]}
+             for i in range(25600)}
+    try:
+        session.write_pcap(flows)  # must not raise
+        assert (session.run_dir / "net" / "capture.pcap").exists()
+    finally:
+        session.store.close()
+
+
 def test_capture_artifacts_refuses_symlink_escaping_workdir(tmp_path):
     session, work = _session(tmp_path)
     secret = tmp_path / "secret.txt"
