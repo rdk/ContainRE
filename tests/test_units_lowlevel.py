@@ -265,6 +265,24 @@ def test_index_self_heals_from_jsonl_on_reopen(tmp_path):
         st2.close()
 
 
+def test_index_self_heals_when_last_record_exceeds_tail_window(tmp_path):
+    d = tmp_path / "run"
+    with RunStore(d) as st:
+        st.write_event(Event(Kind.PROC, {"op": "noop"}))   # seq 0, committed
+    # a lost-commit final record whose single line is > the 64KB tail window
+    big = "x" * 70000
+    with open(d / "events.jsonl", "a") as fh:
+        fh.write(json.dumps({"schema_version": 1, "seq": 1, "ts_mono": 1,
+                             "kind": "proc", "data": {"op": "noop", "blob": big}}) + "\n")
+
+    st2 = RunStore(d)   # the tail-read can't parse the huge last line -> must full-scan
+    try:
+        assert len(st2.query(limit=100)) == 2   # both events indexed, not just seq 0
+        assert st2._seq == 2
+    finally:
+        st2.close()
+
+
 # -- policy defaults / deep-merge -----------------------------------------
 def test_policy_deep_merge_preserves_untouched_defaults():
     from containre import policy as P

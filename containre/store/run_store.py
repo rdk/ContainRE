@@ -85,7 +85,12 @@ class RunStore:
     def _reconcile_index_from_jsonl(self) -> int:
         """Return the max seq, healing the index from events.jsonl if it lags."""
         index_max = self._index_max_seq()
-        if self._jsonl_last_seq() <= index_max:
+        last = self._jsonl_last_seq()
+        # Trust the cheap tail-read gate only when it actually parsed a seq
+        # (>= 0). last == -1 means the tail window held no parseable line (e.g. a
+        # single record larger than the 64KB window) - fall through to the full
+        # scan rather than skipping the heal.
+        if 0 <= last <= index_max:
             return index_max   # index already covers the log; nothing to replay
         try:
             with open(self.events_path) as fh:
