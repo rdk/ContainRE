@@ -81,6 +81,13 @@ class PtraceTracer(L2Engine):
                     if self.l2_mode in ("singlestep", "unicorn") and l2mod.have_capstone()
                     else None)
         self.decoys: set[str] = {os.path.abspath(p) for p in decoy_paths}
+        # kill_on: policy-driven, tracer-observable termination triggers. Only the
+        # triggers the tracer can see are honored here (egress_violation on a
+        # blocked egress, decoy_write on decoy tampering); oom/pids_exceeded are
+        # cgroup-level and belong to the runtime. timeout/event_cap are always-on
+        # safety limits and are intentionally NOT gated on kill_on.
+        self.kill_on: set[str] = set(policy.get("kill_on", []))
+        self._kill_requested = False
         limits = policy.get("limits", {})
         self.wallclock_s: int = int(limits.get("wallclock_s", 120))
         self.max_events = 500_000
@@ -265,6 +272,13 @@ class PtraceTracer(L2Engine):
         except Exception:
             pass
 
+    def _request_kill(self, reason: str) -> None:
+        """Terminate the run if `reason` is one of the policy's kill_on triggers.
+        The main loop tears the specimen down once _kill_requested is set."""
+        if reason in self.kill_on and not self._kill_requested:
+            self.kill_reason = reason
+            self._kill_requested = True
+
     def _maybe_snapshot(self, pid: int, reason: str) -> None:
         # The specimen is stopped at a syscall here, so /proc/<pid>/mem is stable.
         if self._snapshot_cb and reason in self.snapshot_on:
@@ -368,6 +382,8 @@ class PtraceTracer(L2Engine):
             }, pid=process.pid))
             if decision in ("block", "simulated"):
                 self._block_at_enter(process, sc.ECONNREFUSED)
+            if decision == "block":
+                self._request_kill("egress_violation")
             return
         family, ip, target = self._read_addr(process, ptr, ln)
         if family not in (sc.AF_INET, sc.AF_INET6):
@@ -404,6 +420,8 @@ class PtraceTracer(L2Engine):
                 }
         if decision in ("block", "simulated") and not redirected:
             self._block_at_enter(process, sc.ECONNREFUSED)
+        if decision == "block":
+            self._request_kill("egress_violation")
 
     def _handle_net_egress_mmsg(self, process, syscall) -> None:
         """sendmmsg(fd, msgvec, vlen, flags): each batched message carries its own
@@ -416,6 +434,7 @@ class PtraceTracer(L2Engine):
         if not vec_ptr or not vlen:
             return
         blocked = False
+        hard_block = False
         for i in range(min(int(vlen), 1024)):
             family, ip, target = self._read_mmsghdr_addr(process, vec_ptr, i)
             if family not in (sc.AF_INET, sc.AF_INET6):
@@ -429,8 +448,12 @@ class PtraceTracer(L2Engine):
             }, pid=process.pid))
             if decision in ("block", "simulated"):
                 blocked = True
+            if decision == "block":
+                hard_block = True
         if blocked:
             self._block_at_enter(process, sc.ECONNREFUSED)
+        if hard_block:
+            self._request_kill("egress_violation")
 
     def _handle_io_uring_setup(self, process, syscall) -> None:
         """io_uring lets a specimen submit CONNECT/SEND/SENDMSG operations
@@ -579,6 +602,7 @@ class PtraceTracer(L2Engine):
         self.emit(Event(Kind.FILE, data, pid=process.pid))
         if decoy:
             self._maybe_snapshot(process.pid, "decoy")
+            self._request_kill("decoy_write")
 
     def _emit_socket_payload(
         self,
@@ -679,6 +703,8 @@ class PtraceTracer(L2Engine):
         if self._is_decoy(path):
             data["decoy"] = True
         self.emit(Event(Kind.FILE, data, pid=process.pid))
+        if data.get("decoy"):
+            self._request_kill("decoy_write")
 
     def _handle_rename(self, process, syscall) -> None:
         name = syscall.name
@@ -692,6 +718,8 @@ class PtraceTracer(L2Engine):
         if self._is_decoy(p_old) or self._is_decoy(p_new):
             data["decoy"] = True
         self.emit(Event(Kind.FILE, data, pid=process.pid))
+        if data.get("decoy"):
+            self._request_kill("decoy_write")
 
     def _handle_mem(self, process, syscall, result) -> None:
         name = syscall.name
@@ -843,6 +871,12 @@ class PtraceTracer(L2Engine):
 
                 proc = event.process
                 self._step_syscall(proc, options)
+                if self._kill_requested:
+                    # a policy kill_on trigger fired (egress_violation/decoy_write);
+                    # kill_reason is already set. Tear the specimen down; the finally
+                    # block's debugger.quit() reaps any sibling threads.
+                    proc.kill(9)
+                    break
                 if self.event_count > self.max_events:
                     self.kill_reason = "event_cap"
                     proc.kill(9)

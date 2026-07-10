@@ -292,6 +292,48 @@ def test_io_uring_setup_allowed_under_allow_posture():
     assert tracer._pending_block == {}
 
 
+def test_kill_on_egress_violation_requests_kill():
+    tracer, _ = _tracer(kill_on=["egress_violation"])
+    proc = FakeProcess(reads={0x5000: _sockaddr_in("203.0.113.10", 4444)})
+
+    tracer._handle_net_egress(proc, _syscall("connect", 3, 0x5000, 16))
+
+    assert tracer._kill_requested is True
+    assert tracer.kill_reason == "egress_violation"
+
+
+def test_no_kill_when_egress_violation_absent_from_kill_on():
+    tracer, _ = _tracer(kill_on=[])
+    proc = FakeProcess(reads={0x5000: _sockaddr_in("203.0.113.10", 4444)})
+
+    tracer._handle_net_egress(proc, _syscall("connect", 3, 0x5000, 16))
+
+    assert tracer._kill_requested is False
+    assert tracer.kill_reason is None
+
+
+def test_simulated_egress_does_not_trigger_egress_violation_kill():
+    # a simulated (not blocked) egress is contained by design, not a violation.
+    tracer, _ = _tracer(network={"posture": "simulate", "allow": []}, kill_on=["egress_violation"])
+    tracer.sink_addr = ("127.0.0.1", 9999)
+    tracer._is_multithreaded = lambda pid: False
+    proc = FakeProcess(reads={0x5000: _sockaddr_in("203.0.113.9", 443)})
+
+    tracer._handle_net_egress(proc, _syscall("connect", 3, 0x5000, 16))
+
+    assert tracer._kill_requested is False
+
+
+def test_kill_on_decoy_write_requests_kill():
+    tracer, _ = _tracer(kill_on=["decoy_write"])
+    tracer.fd_paths[(FakeProcess.pid, 7)] = "/work/wallet.dat"
+
+    tracer._handle_write(FakeProcess(), _syscall("write", 7, 0x1000, 9), 9)
+
+    assert tracer._kill_requested is True
+    assert tracer.kill_reason == "decoy_write"
+
+
 def test_capture_socket_writev_records_payload_chunks():
     tracer, events = _tracer()
     tracer.flows[(FakeProcess.pid, 4)] = {"raddr": "203.0.113.30:443", "chunks": []}
