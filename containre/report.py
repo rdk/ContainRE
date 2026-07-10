@@ -44,8 +44,15 @@ def _read_events(path: Path) -> list[dict[str, Any]]:
         return []
     events = []
     for line in path.read_text().splitlines():
-        if line.strip():
+        if not line.strip():
+            continue
+        # Tolerate a torn final line (crash mid-write) or a garbage line a root
+        # specimen appended to its own events.jsonl: skip it rather than aborting
+        # the whole report / API read.
+        try:
             events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     return events
 
 
