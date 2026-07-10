@@ -369,6 +369,26 @@ def test_policy_assertions_are_evaluated_and_reported(tmp_path):
     assert "Assertions: `passed`" in rendered
 
 
+def test_negative_assertion_on_missing_subject_is_error_not_silent_pass():
+    summary = {"metrics": {"artifacts.names": ["exfil.dat"]}}
+    result = evaluate_assertions(summary, [
+        # 'artifact.names' is a typo for 'artifacts.names'; a none_match gate must
+        # not vacuously PASS just because the subject didn't resolve.
+        {"id": "typo", "subject": "artifact.names", "op": "none_match", "value": ["*.dat"]},
+    ])
+    row = result["results"][0]
+    assert row["status"] == "error"
+    assert result["status"] == "failed"
+    assert "did not resolve" in row["message"]
+
+
+def test_not_exists_still_passes_on_a_genuinely_missing_subject():
+    result = evaluate_assertions({"metrics": {}}, [
+        {"id": "gone", "subject": "nope.missing", "op": "not_exists"},
+    ])
+    assert result["results"][0]["status"] == "passed"
+
+
 def test_assertion_failures_capture_actual_values():
     summary = {
         "metrics": {

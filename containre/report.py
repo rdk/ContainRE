@@ -514,6 +514,11 @@ def _network_findings(rows: list[dict[str, Any]], retry_threshold: int) -> list[
     return findings
 
 
+# Distinguishes "subject path is absent" from "subject resolved to None", so a
+# mistyped subject can't vacuously satisfy a negative assertion.
+_MISSING = object()
+
+
 def _get_subject(summary: dict[str, Any], subject: str) -> Any:
     metrics = summary.get("metrics", {})
     if subject in metrics:
@@ -523,7 +528,7 @@ def _get_subject(summary: dict[str, Any], subject: str) -> Any:
         if isinstance(current, dict) and part in current:
             current = current[part]
         else:
-            return None
+            return _MISSING
     return current
 
 
@@ -661,8 +666,27 @@ def evaluate_assertions(
         expected = spec.get("value")
         severity = str(spec.get("severity") or ASSERTION_FAILURE_SEVERITY)
         match = str(spec.get("match") or "glob")
-        actual = _get_subject(summary, subject) if subject else None
-        ok, message = _evaluate_assertion(actual, op, expected, match)
+        actual = _get_subject(summary, subject) if subject else _MISSING
+        if actual is _MISSING and op not in ("exists", "not_exists"):
+            # An unresolved subject (typo / renamed metric) must not vacuously
+            # satisfy a negative op (ne/none_match/not_in/not_contains/is_empty/
+            # not_exists); surface it as an error instead of a silent pass.
+            results.append({
+                "id": aid,
+                "title": spec.get("title") or aid,
+                "status": "error",
+                "severity": severity,
+                "subject": subject,
+                "op": op,
+                "match": None,
+                "expected": expected,
+                "actual": None,
+                "message": f"subject {subject!r} did not resolve to a value",
+            })
+            continue
+        eval_actual = None if actual is _MISSING else actual
+        ok, message = _evaluate_assertion(eval_actual, op, expected, match)
+        actual = eval_actual
         results.append({
             "id": aid,
             "title": spec.get("title") or aid,
