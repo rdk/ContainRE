@@ -49,6 +49,16 @@ def test_detections_and_snapshots_scan_past_the_kind_filter(tmp_path):
     assert [e["data"]["snapshot_id"] for e in manager.snapshots("run")] == ["snap-a"]
 
 
+def test_memory_returns_none_for_corrupt_snapshot(tmp_path):
+    _write_meta(tmp_path, "run")
+    snap_dir = tmp_path / "run" / "snapshots"
+    snap_dir.mkdir()
+    (snap_dir / "snap-bad.bin").write_bytes(b"not-a-json-header\x00\x01")  # unparseable header
+    manager = RunManager(runs_root=tmp_path, max_concurrent=1)
+
+    assert manager.memory("run", "snap-bad") is None   # 404, not a 500
+
+
 def test_events_skips_malformed_lines(tmp_path):
     _write_meta(tmp_path, "run")
     (tmp_path / "run" / "events.jsonl").write_text(
