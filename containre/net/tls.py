@@ -8,9 +8,11 @@ handshake fails instead - itself a useful signal.
 """
 from __future__ import annotations
 
+import atexit
 import datetime
 import ipaddress
 import re
+import shutil
 import ssl
 import tempfile
 import threading
@@ -63,6 +65,17 @@ class MitmCA:
                 key_agreement=False, encipher_only=False, decipher_only=False), critical=True)
             .sign(self.key, hashes.SHA256()))
         self._ca_pem = self.cert.public_bytes(serialization.Encoding.PEM)
+        # The temp dir holds throwaway leaf private keys; clean it up when the
+        # (per-run) process exits so mitm runs don't accumulate /tmp key material.
+        atexit.register(self._cleanup)
+
+    def _cleanup(self) -> None:
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def close(self) -> None:
+        """Remove the temp dir of leaf keys now (also runs at process exit)."""
+        atexit.unregister(self._cleanup)
+        self._cleanup()
 
     def ca_pem(self) -> bytes:
         return self._ca_pem

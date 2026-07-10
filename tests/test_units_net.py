@@ -14,6 +14,14 @@ pytestmark = [pytest.mark.unit, pytest.mark.localnet]
 H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 
+def test_mitm_close_removes_temp_key_dir():
+    ca = MitmCA()
+    d = ca._dir
+    assert d.exists()
+    ca.close()
+    assert not d.exists()   # leaf-key temp dir cleaned up
+
+
 def test_mitm_context_for_caps_distinct_sni_minting(monkeypatch):
     ca = MitmCA()
     monkeypatch.setattr(ca, "_leaf_context", lambda host: object())  # avoid real keygen
