@@ -12,7 +12,10 @@ from ptrace.debugger import ProcessExit, ProcessSignal
 
 from ..model import Event, Kind, hx
 from . import l2 as l2mod
+from . import syscalls as sc
 from . import unicorn_region
+
+_MASK = (1 << 64) - 1
 
 
 class L2Engine:
@@ -31,6 +34,68 @@ class L2Engine:
             except AttributeError:
                 pass
         return out
+
+    def _l2_gate_egress(self, process) -> None:
+        """Apply the network policy to an egress `syscall` the loop is about to
+        single-step. Raw single-step executes the syscall in the kernel with no
+        enter-stop, so the L1 egress gate never runs; here we read the destination
+        from the ABI arg registers and, if it is not allowed, invalidate the
+        syscall number (rax = -1) so the kernel skips it and returns -ENOSYS - fail
+        closed, no real egress. Records the attempt as a NET event."""
+        try:
+            name = sc.EGRESS_SYSCALL_NRS.get(process.getreg("rax"))
+        except Exception:
+            return
+        if name is None:
+            return
+        try:
+            # x86-64 syscall arg registers: rdi, rsi, rdx, r10, r8, r9.
+            if name == "connect":
+                dests = [self._read_addr(process, process.getreg("rsi"), process.getreg("rdx"))]
+            elif name == "sendto":
+                r8 = process.getreg("r8")
+                dests = [self._read_addr(process, r8, process.getreg("r9"))] if r8 else []
+            elif name == "sendmsg":
+                dests = [self._read_msghdr_addr(process, process.getreg("rsi"))]
+            else:  # sendmmsg
+                vlen = int(process.getreg("rdx"))
+                vec = process.getreg("rsi")
+                dests = [self._read_mmsghdr_addr(process, vec, i) for i in range(min(vlen, 64))]
+        except Exception:
+            return
+        block = False
+        for family, ip, target in dests:
+            if family not in (sc.AF_INET, sc.AF_INET6):
+                continue
+            decision = self._net_decision(family, ip, target)
+            self.emit(Event(Kind.NET, {
+                "op": "connect" if name == "connect" else "send",
+                "proto": sc.proto_name(family), "raddr": target,
+                "decision": decision, "via": "l2-singlestep",
+            }, pid=process.pid))
+            if decision != "allow":
+                block = True
+                if decision == "block":
+                    self._request_kill("egress_violation")
+        if block:
+            try:
+                process.setreg("rax", _MASK)  # invalid nr -> kernel skips, returns -ENOSYS
+            except Exception:
+                pass
+
+    def _l2_gate_egress_at_rip(self, process) -> None:
+        """Decode the instruction at rip and gate it if it is a `syscall` (used by
+        _seek_to, which single-steps without decoding each instruction)."""
+        if self._md is None:
+            return
+        try:
+            ip = process.getreg("rip")
+            code = bytes(process.readBytes(ip, 15))
+        except Exception:
+            return
+        insn = l2mod.disasm_one(self._md, code, ip)
+        if insn and insn.mnemonic == "syscall":
+            self._l2_gate_egress(process)
 
     def _single_step_window(self, process) -> str:
         """Single-step the specimen for a bounded window, emitting an `instr` event
@@ -55,10 +120,13 @@ class L2Engine:
             insn = l2mod.disasm_one(self._md, code, ip)
             disasm = f"{insn.mnemonic} {insn.op_str}".strip() if insn else "(bad)"
 
-            if until_io and insn and insn.mnemonic == "syscall":
-                if self._safe_getreg(process, "rax") in l2mod.IO_SYSCALL_NRS:
+            if insn and insn.mnemonic == "syscall":
+                if until_io and self._safe_getreg(process, "rax") in l2mod.IO_SYSCALL_NRS:
                     outcome = "until_io"
                     break
+                # Enforce the egress policy before the kernel runs this syscall;
+                # raw single-step would otherwise bypass the L1 gate entirely.
+                self._l2_gate_egress(process)
 
             targets = l2mod.mem_write_targets(insn, lambda n: self._safe_getreg(process, n), ip)
             olds: dict[tuple[int, int], bytes] = {}
@@ -127,6 +195,9 @@ class L2Engine:
             try:
                 if process.getreg("rip") == target:
                     return "reached"
+                # Gate egress syscalls encountered while seeking, same as the
+                # single-step window, so the seek phase can't leak the network.
+                self._l2_gate_egress_at_rip(process)
                 process.singleStep()
                 event = self.debugger.waitProcessEvent(pid=process.pid)
             except Exception:

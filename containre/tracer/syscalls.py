@@ -34,6 +34,11 @@ NET_SYSCALLS = {
 # be gated too (recvmmsg is receive-only and never egresses).
 NET_EGRESS_SYSCALLS = {"connect", "sendto", "sendmsg", "sendmmsg"}
 
+# x86-64 syscall numbers for the egress-initiating calls. The L2 single-step
+# engine sees raw `syscall` instructions rather than python-ptrace's decoded
+# names, so it matches on the number in rax.
+EGRESS_SYSCALL_NRS = {42: "connect", 44: "sendto", 46: "sendmsg", 307: "sendmmsg"}
+
 FILE_OPEN_SYSCALLS = {"open", "openat", "openat2", "creat"}
 FILE_SYSCALLS = FILE_OPEN_SYSCALLS | {
     "write", "pwrite64", "unlink", "unlinkat", "rename", "renameat",
