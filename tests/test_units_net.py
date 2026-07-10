@@ -266,3 +266,32 @@ def test_h2_grpc_replay_sink_can_reject_negative_feature_probe():
     assert b"feature FEAT_ALPHA is not expected to exist in the server" in data
     assert seen and seen[0]["op"] == "h2-grpc-replay"
     assert seen[0]["grpc"]["negative_features"] == ["FEAT_ALPHA"]
+
+
+def test_h2_grpc_replay_rejects_oversized_frame():
+    # A frame whose declared length exceeds the advertised 16384 max must be
+    # rejected (GOAWAY) on the length field, before buffering the body.
+    ca = MitmCA()
+    seen: list[dict] = []
+    sink = BuiltinSink(on_interaction=seen.append, mitm=True, ca=ca,
+                       sink_config={"type": "h2-grpc-replay", "idle_timeout_s": 2})
+    sink.start()
+    try:
+        cctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        cctx.load_verify_locations(cadata=ca.ca_pem().decode())
+        cctx.set_alpn_protocols(["h2"])
+        raw = socket.create_connection(("127.0.0.1", sink.port), timeout=3)
+        tls = cctx.wrap_socket(raw, server_hostname="grpc.example.test")
+        # 9-byte DATA frame header declaring 20480 bytes (> 16384), no body sent.
+        oversized = (20480).to_bytes(3, "big") + bytes([0x0, 0x0]) + (1).to_bytes(4, "big")
+        tls.sendall(H2_PREFACE + h2_frame(0x4, 0, 0) + oversized)
+        try:
+            tls.recv(400)   # drains the sink's SETTINGS/GOAWAY
+        except OSError:
+            pass
+        tls.close()
+    finally:
+        sink.stop()
+
+    assert seen and seen[0]["op"] == "h2-grpc-replay"
+    assert seen[0].get("note") == "frame exceeds advertised max frame size"
