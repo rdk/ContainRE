@@ -364,9 +364,18 @@ class DockerRuntime:
             return None
 
     def stop(self, handle: RunHandle) -> None:
-        if handle.container:
+        # A per-run container is killed outright. A shared reuse container
+        # (containre-reuse-<key>) is long-lived and may back other concurrent
+        # same-key runs, so killing it would tear those down and defeat reuse;
+        # stop only this run's exec client instead (the in-container runner, which
+        # requires tracer=none, is bounded by its own wallclock watchdog).
+        if handle.container and not handle.container.startswith("containre-reuse-"):
             subprocess.run(["docker", "kill", handle.container],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        proc = self._procs.get(str(handle.run_dir))
+        if proc and proc.poll() is None:
+            proc.terminate()
 
     # -- CRIU checkpoint/restore (best-effort) ------------------------------
     def _experimental(self) -> bool:
