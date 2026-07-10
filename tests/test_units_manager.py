@@ -34,6 +34,22 @@ def test_list_marks_active_runs(tmp_path):
     assert by_id["finished-run"]["active"] is False
 
 
+def test_events_skips_malformed_lines(tmp_path):
+    _write_meta(tmp_path, "run")
+    (tmp_path / "run" / "events.jsonl").write_text(
+        '{"seq": 0, "kind": "proc", "data": {}}\n'
+        'this is not json\n'                       # torn/garbage line
+        '{"no_seq_field": true}\n'                 # valid json but missing seq
+        '{"seq": 2, "kind": "net", "data": {}}\n'
+    )
+    manager = RunManager(runs_root=tmp_path, max_concurrent=1)
+
+    res = manager.events("run")
+
+    assert [e["seq"] for e in res["events"]] == [0, 2]   # bad lines skipped, good ones kept
+    assert res["next_seq"] == 3
+
+
 def test_checkpoint_rejects_unsafe_name_without_writing_outside_run(tmp_path):
     _write_meta(tmp_path, "run")
     manager = RunManager(runs_root=tmp_path, max_concurrent=1)

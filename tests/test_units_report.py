@@ -274,6 +274,16 @@ def test_file_inventory_excludes_symlinks_escaping_workdir(tmp_path):
     assert all("HOST SECRET" not in (row.get("sha256") or "") for row in summary["work_files"]["files"])
 
 
+def test_summary_tolerates_a_malformed_events_line(tmp_path):
+    run = tmp_path / "run-torn"
+    _write_run(run, [{"seq": 0, "kind": "proc", "data": {"op": "exit", "exit_code": 0}}])
+    # a garbage / torn line appended to events.jsonl must not crash the report.
+    with (run / "events.jsonl").open("a") as fh:
+        fh.write('{"seq": 1, "kind": "net"  <-- torn\n')
+    summary = summarize_run_dir(run)  # must not raise
+    assert summary["run_id"] == run.name
+
+
 def test_summary_builds_decoy_file_event_metrics(tmp_path):
     run = tmp_path / "run-decoys"
     _write_run(run, [

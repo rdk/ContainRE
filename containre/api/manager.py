@@ -155,11 +155,18 @@ class RunManager:
                 for line in fh:
                     if not line.strip():
                         continue
-                    e = json.loads(line)
-                    if e["seq"] < since:
+                    # Tolerate a torn final line or a garbage/forged line: skip it
+                    # rather than 500-ing the whole /events, /detections, /summary
+                    # and websocket surface for the run.
+                    try:
+                        e = json.loads(line)
+                        seq = e["seq"]
+                    except (json.JSONDecodeError, KeyError, TypeError):
                         continue
-                    next_seq = e["seq"] + 1
-                    if kind and e["kind"] != kind:
+                    if seq < since:
+                        continue
+                    next_seq = seq + 1
+                    if kind and e.get("kind") != kind:
                         continue
                     events.append(e)
                     if len(events) >= limit:
