@@ -240,6 +240,8 @@ class PtraceTracer(L2Engine):
             self._handle_net_egress(process, syscall)
         elif name == "sendmmsg":
             self._handle_net_egress_mmsg(process, syscall)
+        elif name == "io_uring_setup":
+            self._handle_io_uring_setup(process, syscall)
         elif name in ("execve", "execveat"):
             self._handle_execve(process, syscall)
 
@@ -380,6 +382,22 @@ class PtraceTracer(L2Engine):
                 blocked = True
         if blocked:
             self._block_at_enter(process, sc.ECONNREFUSED)
+
+    def _handle_io_uring_setup(self, process, syscall) -> None:
+        """io_uring lets a specimen submit CONNECT/SEND/SENDMSG operations
+        asynchronously via io_uring_enter, entirely bypassing the per-syscall
+        egress gate. We cannot decode the ring's submission queue entries in
+        flight, so under any egress-restricting posture we fail closed: deny ring
+        creation with -ENOSYS (a normal condition on many kernels/containers that
+        well-behaved software falls back from). Under posture=allow egress is
+        permitted anyway, so the ring is left intact. Setup is the only way to
+        create a ring, so denying it closes io_uring_enter as well. It is a
+        high-signal event either way."""
+        block = self.net_posture != "allow"
+        self.emit(Event(Kind.SYSCALL, {"name": "io_uring_setup", "phase": "enter",
+                                       "blocked": block}, pid=process.pid))
+        if block:
+            self._block_at_enter(process, errno_mod.ENOSYS)
 
     def _handle_connect_result(self, process, syscall, result) -> None:
         pending = self._pending_connect.pop(process.pid, None)

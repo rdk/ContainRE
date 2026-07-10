@@ -218,6 +218,28 @@ def test_handle_net_sendmmsg_blocks_whole_batch_if_any_message_blocked():
     assert proc.regs, "one blocked message must fail the whole batched syscall closed"
 
 
+def test_io_uring_setup_blocked_under_restricting_posture():
+    import errno as _errno
+    tracer, events = _tracer(network={"posture": "deny", "allow": []})
+
+    tracer._handle_io_uring_setup(FakeProcess(), _syscall("io_uring_setup", 64, 0x1000))
+
+    assert events[0].kind == Kind.SYSCALL
+    assert events[0].data == {"name": "io_uring_setup", "phase": "enter", "blocked": True}
+    assert tracer._pending_block == {FakeProcess.pid: _errno.ENOSYS}
+
+
+def test_io_uring_setup_allowed_under_allow_posture():
+    tracer, events = _tracer(network={"posture": "allow", "allow": []})
+    proc = FakeProcess()
+
+    tracer._handle_io_uring_setup(proc, _syscall("io_uring_setup", 64, 0x1000))
+
+    assert events[0].data["blocked"] is False
+    assert not proc.regs
+    assert tracer._pending_block == {}
+
+
 def test_capture_socket_writev_records_payload_chunks():
     tracer, events = _tracer()
     tracer.flows[(FakeProcess.pid, 4)] = {"raddr": "203.0.113.30:443", "chunks": []}
