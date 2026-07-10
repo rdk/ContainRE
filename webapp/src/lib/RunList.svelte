@@ -25,7 +25,11 @@
         body.binary = trimmedBinary;
         body.net = net;
         body.mitm = net === 'simulate' && mitm;
-        body.decoys = decoys.split(',').map((s) => s.trim()).filter(Boolean);
+        // Only send decoys when the field is non-empty: sending [] would override
+        // (wipe) any files.decoys set in the pasted policy, silently disabling
+        // canary/ransomware detection for the run.
+        const decoyList = decoys.split(',').map((s) => s.trim()).filter(Boolean);
+        if (decoyList.length) body.decoys = decoyList;
         if (l2 !== 'off') {
           body.policy = { ...(body.policy ?? {}), trace: { ...((body.policy ?? {}).trace ?? {}), l2: { mode: l2 } } };
         }
