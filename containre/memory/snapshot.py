@@ -69,14 +69,24 @@ def capture(pid: int, cap_total: int = CAP_TOTAL) -> tuple[bytes, list[dict], in
     if mem is not None:
         try:
             for r in regions:
-                if total >= cap_total or not _is_interesting(r):
+                if total >= cap_total:
+                    break
+                if not _is_interesting(r):
                     continue
                 base = int(r["base"], 16)
+                # /proc/pid/mem seeks use signed off_t (max 2**63-1). Kernel
+                # pseudo-mappings like [vsyscall] at 0xffffffffff600000 sit above
+                # that and would raise OverflowError, which previously escaped and
+                # dropped the entire snapshot. They hold no specimen data, so skip
+                # any base beyond the seekable range (this keeps all user memory,
+                # including 5-level-paging addresses < 2**63).
+                if base >= (1 << 63):
+                    continue
                 n = min(r["size"], CAP_REGION, cap_total - total)
                 try:
                     mem.seek(base)
                     data = mem.read(n)
-                except (OSError, ValueError):
+                except (OSError, ValueError, OverflowError):
                     continue
                 if not data:
                     continue
