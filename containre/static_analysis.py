@@ -251,6 +251,7 @@ def _strings(path: Path, rel_file: str, max_strings: int) -> tuple[list[dict[str
     stdout, err = _run_tool(["strings", "-a", "-tx", str(path)])
     warnings = [err] if err else []
     rows = []
+    truncated = False
     for raw in stdout.splitlines():
         match = _STRING_RE.match(raw)
         if not match:
@@ -258,14 +259,17 @@ def _strings(path: Path, rel_file: str, max_strings: int) -> tuple[list[dict[str
         text = match.group(2)
         if len(text) < 4:
             continue
+        if len(rows) >= max_strings:
+            # A further qualifying string exists beyond the cap -> genuinely
+            # truncated (a file with EXACTLY max_strings must not warn).
+            truncated = True
+            break
         rows.append({
             "file": rel_file,
             "offset": f"0x{int(match.group(1), 16):x}",
             "value": text[:500],
         })
-        if len(rows) >= max_strings:
-            break
-    if len(rows) >= max_strings:
+    if truncated:
         warnings.append(f"strings truncated at {max_strings} entries for {rel_file}")
     return rows, warnings
 

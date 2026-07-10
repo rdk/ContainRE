@@ -17,6 +17,24 @@ from containre.static_analysis import (
 pytestmark = pytest.mark.unit
 
 
+def test_strings_no_false_truncation_at_exact_cap(tmp_path):
+    import shutil
+
+    from containre.static_analysis import _strings
+    if not shutil.which("strings"):
+        pytest.skip("strings not available")
+    p = tmp_path / "s.bin"
+    p.write_bytes(b"AAAA\x00BBBB\x00CCCC\x00")   # exactly 3 qualifying strings
+
+    rows, warns = _strings(p, "s.bin", max_strings=3)
+    assert len(rows) == 3
+    assert not any("truncated" in w for w in warns)   # complete -> no warning
+
+    rows2, warns2 = _strings(p, "s.bin", max_strings=2)
+    assert len(rows2) == 2
+    assert any("truncated" in w for w in warns2)       # genuinely truncated -> warn
+
+
 def test_call_re_captures_full_demangled_target_with_nested_brackets():
     line = ("  138e:\te8 01 02 03 04       \tcallq  1234 "
             "<std::vector<int, std::allocator<int> >::push_back(int const&)>")
