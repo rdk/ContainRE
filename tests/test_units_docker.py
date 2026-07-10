@@ -15,35 +15,15 @@ def _rt():
     return DockerRuntime()
 
 
-class _FakeProc:
-    def __init__(self):
-        self.terminated = False
-
-    def poll(self):
-        return None
-
-    def terminate(self):
-        self.terminated = True
-
-
-def test_stop_reuse_container_terminates_exec_not_shared_container(monkeypatch):
-    rt = _rt()
-    killed = []
-    monkeypatch.setattr("containre.runtime.docker.subprocess.run", lambda *a, **k: killed.append(a))
-    fp = _FakeProc()
-    rt._procs["/runs/r1"] = fp
-    rt.stop(RunHandle(run_dir=Path("/runs/r1"), runtime="docker",
-                      container="containre-reuse-default", pid=1))
-    assert fp.terminated is True
-    assert killed == []   # the shared reuse container must NOT be docker-killed
-
-
-def test_stop_per_run_container_is_killed(monkeypatch):
-    rt = _rt()
-    calls = []
-    monkeypatch.setattr("containre.runtime.docker.subprocess.run", lambda *a, **k: calls.append(a[0]))
-    rt.stop(RunHandle(run_dir=Path("/runs/r2"), runtime="docker", container="containre-r2", pid=1))
-    assert calls and list(calls[0][:2]) == ["docker", "kill"]
+def test_stop_kills_the_container_to_actually_stop_the_specimen(monkeypatch):
+    # For both per-run and shared reuse containers, stop() must docker-kill the
+    # container: reliably stopping the specimen is the safety-critical property.
+    for name in ("containre-r2", "containre-reuse-default"):
+        calls = []
+        monkeypatch.setattr("containre.runtime.docker.subprocess.run",
+                            lambda *a, **k: calls.append(a[0]))
+        _rt().stop(RunHandle(run_dir=Path("/runs/x"), runtime="docker", container=name, pid=1))
+        assert calls and list(calls[0][:3]) == ["docker", "kill", name]
 
 
 def test_deny_without_allowlist_is_fully_detached():

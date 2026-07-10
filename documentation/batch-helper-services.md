@@ -58,7 +58,11 @@ Constraints:
 - stdin is not supported in reuse mode; pass files through the work directory;
 - use a stable `files.work_mount` if you want reuse across multiple runs;
 - Docker network/mount/limit changes recreate the keyed container;
-- stopping a run kills the keyed container for safety.
+- stopping a run `docker kill`s the keyed container so the specimen is reliably
+  stopped. **Do not run multiple runs on the same `docker_reuse_key`
+  concurrently:** stopping (or the wallclock-timeout of) one tears down the
+  shared container and therefore every other run sharing that key. Use distinct
+  keys for runs you want to stop independently.
 
 The reusable container is named `containre-reuse-<docker_reuse_key>`. Remove it
 manually when finished:
