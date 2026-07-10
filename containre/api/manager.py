@@ -163,6 +163,8 @@ class RunManager:
                         seq = e["seq"]
                     except (json.JSONDecodeError, KeyError, TypeError):
                         continue
+                    if not isinstance(seq, int) or isinstance(seq, bool):
+                        continue  # forged non-integer seq: the comparison below would raise
                     if seq < since:
                         continue
                     next_seq = seq + 1
@@ -178,7 +180,7 @@ class RunManager:
         # events scanned; otherwise a specimen could bury its snapshots past the
         # 100000th (any-kind) event and hide them from this endpoint.
         return [e for e in self.events(run_id, limit=100000, kind="mem")["events"]
-                if e["data"].get("op") == "snapshot"]
+                if (e.get("data") or {}).get("op") == "snapshot"]
 
     def detections(self, run_id: str) -> list[dict]:
         return self.events(run_id, limit=100000, kind="detection")["events"]
