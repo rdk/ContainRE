@@ -11,9 +11,15 @@ import json
 import os
 import subprocess
 import sys
+import warnings
 
 from ..control.instrumentation import configure_tls_plaintext
 from ..interfaces import Job, RunHandle
+
+
+class LocalRuntimeIsolationWarning(UserWarning):
+    """Raised when a specimen is launched under LocalRuntime, which provides no
+    container/cgroup/network-namespace isolation."""
 
 
 class LocalRuntime:
@@ -35,6 +41,18 @@ class LocalRuntime:
         return apply
 
     def start(self, job: Job) -> RunHandle:
+        # LocalRuntime is the default backend but runs the specimen directly on
+        # the host with no container/cgroup/netns isolation - containment then
+        # rests entirely on the (evadable) ptrace tracer. Make that loud so an
+        # operator does not detonate real malware on the host unaware.
+        warnings.warn(
+            "LocalRuntime runs the specimen directly on the host with NO "
+            "container/cgroup/network isolation - not safe for untrusted malware. "
+            "Use the docker runtime (CONTAINRE_RUNTIME=docker / --runtime docker) "
+            "for real specimens.",
+            LocalRuntimeIsolationWarning,
+            stacklevel=2,
+        )
         configure_tls_plaintext(job)
         job_file = job.run_dir / "job.json"
         job_file.write_text(json.dumps(job.to_json()))
