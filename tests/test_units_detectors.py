@@ -8,10 +8,16 @@ from containre.detect.detectors import DecoyDetector, InjectionDetector
 pytestmark = pytest.mark.unit
 
 
-def test_injection_detector_fires_on_mmap_exec():
+def test_injection_detector_fires_on_rwx_mmap():
     det = InjectionDetector()
     out = det.feed({"kind": "mem", "seq": 1, "data": {"op": "map", "region": {"perms": "rwx"}}})
     assert out and out[0]["id"] == "rwx-memory"
+
+
+def test_injection_detector_ignores_plain_rx_mmap():
+    # the dynamic loader maps code as r-x; that must not false-positive.
+    det = InjectionDetector()
+    assert det.feed({"kind": "mem", "seq": 1, "data": {"op": "map", "region": {"perms": "r-x"}}}) == []
 
 
 def test_injection_detector_still_fires_on_mprotect_exec():
