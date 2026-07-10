@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 from ..interfaces import Job
@@ -192,9 +193,15 @@ def execute(job: Job) -> int:
             net_sink.stop()
 
     if tracer_mode != "none":
-        session.close_detectors()
-        session.write_pcap(flows)
-        session.capture_artifacts()
+        # A failure in any post-processing step must not prevent finalize() from
+        # writing the terminal meta.json (else the run is stuck 'running' with an
+        # unflushed store). Surface failures to runner.log for diagnosis.
+        for step in (session.close_detectors, lambda: session.write_pcap(flows),
+                     session.capture_artifacts):
+            try:
+                step()
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
     session.finalize("killed" if kill_reason else "finished", exit_code, kill_reason)
     return exit_code
 

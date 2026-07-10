@@ -97,7 +97,11 @@ class RunSession:
         writer = PcapWriter(str(netdir / "capture.pcap"))
         added = False
         for i, flow in enumerate(flows.values()):
-            added = writer.add_flow(flow["raddr"], flow["chunks"], sport=40000 + i) or added
+            # Wrap the synthetic source port into the ephemeral range so a run
+            # with >25k flows doesn't overflow the 16-bit field (struct.error);
+            # a reused sport is harmless in a reconstructed capture.
+            sport = 40000 + (i % 25000)
+            added = writer.add_flow(flow["raddr"], flow["chunks"], sport=sport) or added
         if added:
             writer.write()
 
