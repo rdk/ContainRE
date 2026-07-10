@@ -93,11 +93,23 @@ class RunSession:
             writer.write()
 
     def capture_artifacts(self) -> None:
+        # The specimen (now exited) may have replaced a recorded /work file with a
+        # symlink to an arbitrary host file, so re-reading it here would exfiltrate
+        # that file into a downloadable artifact. Since the specimen is gone there
+        # is no live race: resolve each path and refuse anything whose real
+        # location escapes the workdir (this catches a symlinked final component
+        # AND symlinked parent dirs). Read the resolved path, whose final component
+        # is guaranteed not to be a symlink.
+        workdir_real = os.path.realpath(self.workdir)
+        prefix = workdir_real + os.sep
         for path in sorted(self.written_files):
-            if not os.path.isfile(path):
+            real = os.path.realpath(path)
+            if real != workdir_real and not real.startswith(prefix):
+                continue
+            if not os.path.isfile(real):
                 continue
             try:
-                data = Path(path).read_bytes()[:_MAX_ARTIFACT_BYTES]
+                data = Path(real).read_bytes()[:_MAX_ARTIFACT_BYTES]
             except OSError:
                 continue
             artifact_id = self.store.add_artifact(os.path.basename(path), data)

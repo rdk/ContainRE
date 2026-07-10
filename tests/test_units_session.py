@@ -67,6 +67,38 @@ def test_capture_artifacts_ignores_paths_outside_workdir(tmp_path):
         session.store.close()
 
 
+def test_capture_artifacts_refuses_symlink_escaping_workdir(tmp_path):
+    session, work = _session(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"TOP SECRET HOST FILE")
+    # specimen recorded a write to work/loot, then replaced it with a symlink to a
+    # host file outside the workdir before exiting.
+    loot = work / "loot"
+    loot.symlink_to(secret)
+    try:
+        session.emit(Event(Kind.FILE, {"op": "write", "path": str(loot), "size": 4}))
+        session.capture_artifacts()
+        files = list((session.run_dir / "files").iterdir())
+        assert files == [], "symlink escaping workdir must not be captured"
+    finally:
+        session.store.close()
+
+
+def test_capture_artifacts_refuses_symlinked_parent_dir(tmp_path):
+    session, work = _session(tmp_path)
+    secret = tmp_path / "vault"
+    secret.mkdir()
+    (secret / "key").write_bytes(b"host key material")
+    # a parent component under workdir is a symlink pointing outside it.
+    (work / "d").symlink_to(secret)
+    try:
+        session.emit(Event(Kind.FILE, {"op": "write", "path": str(work / "d" / "key"), "size": 4}))
+        session.capture_artifacts()
+        assert list((session.run_dir / "files").iterdir()) == []
+    finally:
+        session.store.close()
+
+
 def test_write_pcap_skips_empty_flows_and_writes_nonempty_flow(tmp_path):
     session, _ = _session(tmp_path)
     try:
