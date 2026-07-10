@@ -27,7 +27,7 @@ class DecoyDetector(_Base):
     """A specimen touching a planted canary file is high-signal (ransomware/stealer)."""
     name = "decoy"
 
-    _TAMPER_OPS = ("write", "unlink", "rename", "chmod")
+    _TAMPER_OPS = ("write", "unlink", "rename", "chmod", "truncate")
     _ACCESS_OPS = ("open", "read")
 
     def __init__(self) -> None:
