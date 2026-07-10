@@ -333,6 +333,18 @@ def _metrics(summary: dict[str, Any]) -> dict[str, Any]:
     static = summary.get("static", {}) or {}
     static_summary = static.get("summary", {}) or {}
     tls_plaintext = (summary.get("instrumentation", {}) or {}).get("tls_plaintext", {}) or {}
+    # Derive detections.max_severity from the detection events actually read
+    # (consistent with detections.count/.ids), reconciled with meta.verdict by
+    # taking the stronger. meta.verdict is written only at finalize, so a run
+    # hard-killed after a critical detection would otherwise report count>=1 with
+    # max_severity='info'.
+    _events_sev = max(
+        (_SEVERITY_RANK.get(str(det.get("severity", "info")), 0) for det in detections),
+        default=0,
+    )
+    _verdict_sev = _SEVERITY_RANK.get(str(verdict.get("max_severity", "info")), 0)
+    _rank_to_name = {rank: name for name, rank in _SEVERITY_RANK.items()}
+    detections_max_severity = _rank_to_name[max(_events_sev, _verdict_sev)]
     return {
         "status": summary.get("status"),
         "exit_code": summary.get("exit_code"),
@@ -386,7 +398,7 @@ def _metrics(summary: dict[str, Any]) -> dict[str, Any]:
             str(det.get("id") or det.get("title") or "detection")
             for det in detections
         }),
-        "detections.max_severity": verdict.get("max_severity", "info"),
+        "detections.max_severity": detections_max_severity,
         "verdict.flags": verdict.get("flags", []),
         "verdict.attack": verdict.get("attack", []),
         "artifacts.count": artifacts.get("count", 0),
