@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..control.verdict import Verdict
 from ..detect import YaraScanner, default_detectors
-from ..memory import blob_suffix, capture
+from ..memory import blob_suffix, capture, compress
 from ..model import Event, Kind, wall_ns
 from ..net import PcapWriter
 from ..store import RunStore
@@ -62,16 +62,19 @@ class RunSession:
 
     # -- memory snapshots ---------------------------------------------------
     def snapshot(self, pid: int, reason: str) -> None:
-        blob, regions, total = capture(pid)
-        snapshot_id = self.store.add_snapshot(blob, suffix=blob_suffix())
+        raw, regions, total = capture(pid)
+        snapshot_id = self.store.add_snapshot(compress(raw), suffix=blob_suffix())
         data: dict = {"op": "snapshot", "snapshot_id": snapshot_id,
-                      "reason": reason, "region_count": total, "bytes": len(blob)}
+                      "reason": reason, "region_count": total, "bytes": len(raw)}
         if regions:
             r = regions[0]
             data["region"] = {"base": r["base"], "size": r["size"], "perms": r["perms"]}
         self.emit(Event(Kind.MEM, data, pid=pid))
+        # Scan the RAW (pre-compression) bytes: YARA byte patterns (MZ/UPX!/etc.)
+        # do not survive zstd compression, so scanning the stored blob matched
+        # nothing whenever the snapshots extra was installed.
         if self.yara and self.yara.enabled():
-            for d in self.yara.scan(blob, {"snapshot_id": snapshot_id}):
+            for d in self.yara.scan(raw, {"snapshot_id": snapshot_id}):
                 self.record_detection(d, pid)
 
     # -- finalization -------------------------------------------------------

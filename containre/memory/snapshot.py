@@ -50,11 +50,12 @@ def _is_interesting(region: dict) -> bool:
 
 
 def capture(pid: int, cap_total: int = CAP_TOTAL) -> tuple[bytes, list[dict], int]:
-    """Return (blob, captured_region_metas, total_region_count).
+    """Return (raw_blob, captured_region_metas, total_region_count).
 
-    The blob is ``<json-header>\\n<concatenated region bytes>``, optionally
-    zstd-compressed. The header lists each captured region and its dumped length
-    so the blob is self-describing.
+    The raw blob is ``<json-header>\\n<concatenated region bytes>``; the header
+    lists each captured region and its dumped length so the blob is
+    self-describing. Callers ``compress()`` it for storage but must scan the RAW
+    bytes (YARA byte patterns do not survive compression).
     """
     regions = _read_maps(pid)
     captured_meta: list[dict] = []
@@ -87,9 +88,16 @@ def capture(pid: int, cap_total: int = CAP_TOTAL) -> tuple[bytes, list[dict], in
 
     header = json.dumps({"pid": pid, "regions": captured_meta}).encode()
     blob = header + b"\n" + b"".join(chunks)
-    if _zstd is not None:
-        blob = _zstd.ZstdCompressor(level=3).compress(blob)
     return blob, captured_meta, len(regions)
+
+
+def compress(blob: bytes) -> bytes:
+    """zstd-compress a raw snapshot blob for on-disk storage when the optional
+    dependency is present, matching blob_suffix(). Scanning must use the raw blob,
+    not this."""
+    if _zstd is not None:
+        return _zstd.ZstdCompressor(level=3).compress(blob)
+    return blob
 
 
 def blob_suffix() -> str:

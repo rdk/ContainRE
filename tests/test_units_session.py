@@ -99,6 +99,31 @@ def test_capture_artifacts_refuses_symlinked_parent_dir(tmp_path):
         session.store.close()
 
 
+def test_snapshot_yara_scans_raw_uncompressed_bytes(tmp_path, monkeypatch):
+    from containre.tracer import session as sess_mod
+    session, _ = _session(tmp_path, detect={"yara": False})
+    raw = b'{"pid":1,"regions":[]}\n' + b"MZ\x90\x00 unpacked payload marker"
+    monkeypatch.setattr(sess_mod, "capture", lambda pid: (raw, [], 0))
+
+    scanned = {}
+
+    class FakeYara:
+        def enabled(self):
+            return True
+
+        def scan(self, data, ctx):
+            scanned["data"] = data
+            return []
+
+    session.yara = FakeYara()
+    try:
+        session.snapshot(1234, "connect")
+        # YARA must see the raw plaintext bytes, not the zstd-compressed blob.
+        assert scanned["data"] == raw
+    finally:
+        session.store.close()
+
+
 def test_write_pcap_skips_empty_flows_and_writes_nonempty_flow(tmp_path):
     session, _ = _session(tmp_path)
     try:
