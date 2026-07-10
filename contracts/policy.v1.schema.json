@@ -383,7 +383,7 @@
                 "enum": [
                   "eq", "ne", "gt", "gte", "lt", "lte", "between",
                   "in", "not_in", "contains", "not_contains",
-                  "contains_any", "contains_all", "exists", "not_exists",
+                  "contains_any", "contains_all", "contains_edge", "exists", "not_exists",
                   "is_empty", "is_not_empty", "any_match", "none_match", "all_match"
                 ]
               },
