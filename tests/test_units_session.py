@@ -47,6 +47,22 @@ def _decoy_write(work):
                              "size": 4, "decoy": True}, pid=1)
 
 
+def test_runsession_surfaces_yara_rule_errors_as_detections(tmp_path):
+    from containre.detect import have_yara
+    if not have_yara():
+        pytest.skip("yara-python not installed")
+    bad = tmp_path / "bad.yar"
+    bad.write_text("rule broken { this is not valid yara }")
+    session, _ = _session(tmp_path, detect={"yara": True, "yara_rules": [str(bad)]})
+    try:
+        dets = [e for e in _events(session)
+                if e["kind"] == "detection" and e["data"].get("id") == "yara-rule-error"]
+        assert dets and dets[0]["data"]["severity"] == "low"
+        assert "failed to compile" in dets[0]["data"]["title"]
+    finally:
+        session.store.close()
+
+
 def test_detect_heuristics_flag_disables_heuristic_detectors(tmp_path):
     session, work = _session(tmp_path, detect={"yara": False, "heuristics": False})
     try:
