@@ -18,6 +18,20 @@ from containre.store import RunStore
 from containre.tracer import l2, syscalls as sc
 
 
+def test_emitted_net_ops_and_protos_conform():
+    if contracts.find_contracts_dir() is None:
+        pytest.skip("contracts dir not found")
+    # ops/protos the tracer + sink actually emit under the default simulate posture
+    for data in [
+        {"op": "connect_result", "proto": "tcp", "decision": "allow", "success": True},
+        {"op": "socket_error", "proto": "tcp", "status": "ok"},
+        {"op": "h2-grpc-replay", "proto": "h2"},
+        {"op": "connect", "proto": "tls"},
+    ]:
+        ev = {"schema_version": 1, "seq": 0, "ts_mono": 1, "kind": "net", "data": data}
+        assert contracts.validate(ev, "events.v1.schema.json") == [], data
+
+
 def test_queued_meta_with_null_runtime_conforms():
     if contracts.find_contracts_dir() is None:
         pytest.skip("contracts dir not found")

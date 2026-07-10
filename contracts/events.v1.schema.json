@@ -47,8 +47,8 @@
       "type": "object",
       "required": ["op"],
       "properties": {
-        "op": { "enum": ["socket", "connect", "bind", "listen", "accept", "send", "recv", "close", "dns", "http"] },
-        "proto": { "enum": ["tcp", "udp", "icmp", "unix"] },
+        "op": { "enum": ["socket", "connect", "connect_result", "socket_error", "bind", "listen", "accept", "send", "recv", "close", "dns", "http", "h2-grpc-replay"] },
+        "proto": { "enum": ["tcp", "udp", "icmp", "unix", "tls", "h2"] },
         "laddr": { "type": "string", "description": "Local address ip:port." },
         "raddr": { "type": "string", "description": "Remote address ip:port or host:port." },
         "bytes": { "type": "integer", "minimum": 0 },
