@@ -255,6 +255,25 @@ def test_summary_builds_metrics_and_file_inventories(tmp_path):
     assert "snap-abc" in rendered
 
 
+def test_file_inventory_excludes_symlinks_escaping_workdir(tmp_path):
+    run = tmp_path / "run-symlink"
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("HOST SECRET")
+    _write_run(run, [
+        {"seq": 0, "kind": "file", "data": {"op": "write", "path": str(run / "work/loot")}},
+    ])
+    (run / "work").mkdir()
+    (run / "work" / "real.txt").write_text("ok")
+    (run / "work" / "loot").symlink_to(secret)  # specimen-planted symlink to a host file
+
+    summary = summarize_run_dir(run)
+    names = summary["metrics"]["work_files.names"]
+
+    assert "real.txt" in names
+    assert "loot" not in names   # must not follow the symlink / leak the host file
+    assert all("HOST SECRET" not in (row.get("sha256") or "") for row in summary["work_files"]["files"])
+
+
 def test_summary_builds_decoy_file_event_metrics(tmp_path):
     run = tmp_path / "run-decoys"
     _write_run(run, [

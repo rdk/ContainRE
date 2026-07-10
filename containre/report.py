@@ -4,6 +4,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -90,7 +91,18 @@ def _file_inventory(
     if not base.exists() or not base.is_dir():
         return {"base": str(base), "exists": False, "files": [], "count": 0, "total_bytes": 0,
                 "truncated": False}
-    files = [path for path in sorted(base.rglob("*")) if path.is_file()]
+    # The base (e.g. the specimen-controlled /work) may contain symlinks the
+    # specimen planted to arbitrary host files; following them would leak those
+    # files' size/hash/content into the report. Skip symlinks and anything whose
+    # real path escapes the base (this also catches symlinked parent dirs). The
+    # specimen has already exited, so there is no live race.
+    base_real = os.path.realpath(base)
+    prefix = base_real + os.sep
+    files = [
+        path for path in sorted(base.rglob("*"))
+        if not path.is_symlink() and path.is_file()
+        and os.path.realpath(path).startswith(prefix)
+    ]
     rows = []
     total_bytes = 0
     for path in files[:max_files]:
