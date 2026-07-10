@@ -412,7 +412,7 @@
       "type": "array",
       "description": "Conditions that auto-terminate the run.",
       "items": { "enum": ["egress_violation", "oom", "timeout", "decoy_write", "pids_exceeded", "manual"] },
-      "default": ["egress_violation", "oom", "timeout"]
+      "default": ["oom", "timeout"]
     }
   }
 }
