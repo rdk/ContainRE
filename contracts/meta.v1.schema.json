@@ -40,8 +40,8 @@
     "stopped_wall": { "type": "integer", "description": "Unix wall-clock (ns) at specimen stop." },
     "exit_code": { "type": ["integer", "null"] },
     "kill_reason": {
-      "enum": ["egress_violation", "oom", "timeout", "event_cap", "decoy_write", "pids_exceeded", "setup_failed", "manual", null],
-      "description": "Set when status=killed. event_cap: the per-run event cap was hit; setup_failed: a runtime.setup_command exited non-zero (the failing command index is in its exec event)."
+      "enum": ["egress_violation", "oom", "timeout", "event_cap", "disk", "decoy_write", "pids_exceeded", "setup_failed", "manual", null],
+      "description": "Set when status=killed. event_cap: the per-run event cap was hit; disk: the limits.disk_mb write budget was exceeded; setup_failed: a runtime.setup_command exited non-zero (the failing command index is in its exec event)."
     },
     "counts": {
       "type": "object",
