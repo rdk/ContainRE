@@ -59,7 +59,7 @@ instrumentation:
     libssl: null
 
 runtime:
-  setup_commands: []     # run before specimen, inside the same runtime namespace
+  setup_commands: []     # shell run before the specimen (in-container under docker; ON THE HOST under LocalRuntime)
   teardown_commands: []  # run after specimen or setup failure
   command_shell: /bin/sh
   command_timeout_s: 30
@@ -83,4 +83,4 @@ report:
       match: glob
       severity: high
 
-kill_on: [egress_violation, oom, timeout, decoy_write]
+kill_on: [oom, timeout]   # opt-in extras (abort the recording): egress_violation, decoy_write, pids_exceeded, manual
