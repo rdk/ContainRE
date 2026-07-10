@@ -110,6 +110,18 @@ def _blob(tmp_path):
     return path, header, body
 
 
+def test_capture_skips_high_kernel_addresses_without_crashing(monkeypatch):
+    import os
+    # a [vsyscall]-style region at 0xffffffffff600000 (>= 2**63) must be skipped,
+    # not seek()'d (which raised an uncaught OverflowError and dropped the snapshot).
+    monkeypatch.setattr(snap, "_read_maps", lambda pid: [
+        {"base": "0xffffffffff600000", "size": 0x1000, "perms": "r-xp", "path": "[vsyscall]"},
+    ])
+    blob, meta, total = snap.capture(os.getpid())
+    assert total == 1        # region was seen/counted
+    assert meta == []        # but not dumped, and no exception propagated
+
+
 def test_snapshot_load_and_region_slice(tmp_path):
     path, header, body = _blob(tmp_path)
     h, b = snap.load(path)
