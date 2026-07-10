@@ -224,18 +224,26 @@ def create_app(runs_root: Path | None = None, runtime_name: str | None = None,
             await ws.close()
             return
         try:
+            page = 500
             while True:
-                res = manager.events(run_id, since=since, limit=500)
+                res = manager.events(run_id, since=since, limit=page)
                 for event in res["events"]:
                     await ws.send_json({"type": "event", "event": event})
                 since = res["next_seq"]
+                caught_up = len(res["events"]) < page   # a short page => backlog drained
                 meta = manager.get(run_id)
                 status = meta["status"] if meta else "error"
-                await ws.send_json({"type": "status", "status": status,
-                                    "active": bool(meta and meta.get("active"))})
-                if status in _TERMINAL and not (meta and meta.get("active")):
+                active = bool(meta and meta.get("active"))
+                await ws.send_json({"type": "status", "status": status, "active": active})
+                terminal = status in _TERMINAL and not active
+                # Only stop once the run is terminal AND every buffered event has
+                # been sent; a terminal run with >500 pending events must not be
+                # cut off after the first page.
+                if terminal and caught_up:
                     break
-                await asyncio.sleep(0.2)
+                if not terminal:
+                    await asyncio.sleep(0.2)
+                # terminal-but-not-drained: loop immediately to flush the backlog
         except WebSocketDisconnect:
             return
         await ws.close()
