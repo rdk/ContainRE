@@ -129,6 +129,9 @@ class BuiltinSink:
                 # permanently disable the sink for the rest of the run.
                 if self._stop.is_set() or getattr(exc, "errno", None) == errno.EBADF:
                     break
+                # A persistent error (e.g. EMFILE while connections are queued)
+                # would busy-loop accept() at full speed; back off briefly.
+                self._stop.wait(0.05)
                 continue
             h = threading.Thread(target=self._handle, args=(conn,), daemon=True)
             # Start the handler BEFORE registering it: if start() fails (e.g. the
