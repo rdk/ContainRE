@@ -36,10 +36,16 @@ def _san_for(host: str) -> x509.GeneralName:
 
 
 class MitmCA:
+    # Bound the number of distinct-SNI leaf certs we mint per run: each mint is an
+    # RSA-2048 keygen + on-disk PEM, and the SNI is attacker-supplied, so an
+    # unbounded cache is a CPU/disk/memory amplification primitive.
+    _MAX_CONTEXTS = 128
+
     def __init__(self, cn: str = "ContainRE MITM CA"):
         self._dir = Path(tempfile.mkdtemp(prefix="containre-mitm-"))
         self._lock = threading.Lock()
         self._contexts: dict[str, ssl.SSLContext] = {}
+        self._default_ctx: ssl.SSLContext | None = None
 
         self.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -87,21 +93,37 @@ class MitmCA:
         f.write_bytes(pem)
         return f
 
+    def _leaf_context(self, host: str) -> ssl.SSLContext:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.set_alpn_protocols(["h2", "http/1.1"])
+        ctx.load_cert_chain(str(self._mint(host)))
+        return ctx
+
+    def _default_context(self) -> ssl.SSLContext:
+        if self._default_ctx is None:
+            self._default_ctx = self._leaf_context("localhost")
+        return self._default_ctx
+
     def context_for(self, host: str) -> ssl.SSLContext:
         with self._lock:
             ctx = self._contexts.get(host)
-            if ctx is None:
-                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                ctx.set_alpn_protocols(["h2", "http/1.1"])
-                ctx.load_cert_chain(str(self._mint(host)))
-                self._contexts[host] = ctx
+            if ctx is not None:
+                return ctx
+            if len(self._contexts) >= self._MAX_CONTEXTS:
+                # Cap reached: reuse a shared default leaf rather than minting an
+                # unbounded number of per-SNI keypairs.
+                return self._default_context()
+            ctx = self._leaf_context(host)
+            self._contexts[host] = ctx
             return ctx
 
     def server_context(self) -> ssl.SSLContext:
-        """A TLS server context that swaps in a per-SNI leaf during the handshake."""
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.set_alpn_protocols(["h2", "http/1.1"])
-        ctx.load_cert_chain(str(self._mint("localhost")))  # default when no SNI
+        """A TLS server context that swaps in a per-SNI leaf during the handshake.
+
+        This is the top-level listener context (its own leaf, its own SNI
+        callback); the per-SNI leaves it dispatches to are capped in context_for.
+        """
+        ctx = self._leaf_context("localhost")  # default cert when the client sends no SNI
 
         def _sni(sslsock, server_name, _sslctx):
             if server_name:

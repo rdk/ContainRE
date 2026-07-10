@@ -14,6 +14,19 @@ pytestmark = [pytest.mark.unit, pytest.mark.localnet]
 H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 
+def test_mitm_context_for_caps_distinct_sni_minting(monkeypatch):
+    ca = MitmCA()
+    monkeypatch.setattr(ca, "_leaf_context", lambda host: object())  # avoid real keygen
+    monkeypatch.setattr(MitmCA, "_MAX_CONTEXTS", 3)
+
+    ctxs = [ca.context_for(f"h{i}.example") for i in range(10)]
+
+    assert len(ca._contexts) == 3   # per-SNI cache is bounded
+    # beyond the cap a single shared default context is reused, not newly minted
+    assert ctxs[5] is ctxs[9]
+    assert ca.context_for("later.example") is ctxs[9]
+
+
 def test_stop_survives_unstarted_handler_thread():
     import threading
     sink = BuiltinSink(on_interaction=lambda info: None)
