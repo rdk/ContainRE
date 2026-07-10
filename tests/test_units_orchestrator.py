@@ -6,10 +6,17 @@ import json
 import pytest
 
 from containre import policy as P
-from containre.control.orchestrator import execute
+from containre.control.orchestrator import default_runs_root, execute
 from containre.interfaces import RunHandle
 
 pytestmark = pytest.mark.unit
+
+
+def test_default_runs_root_honors_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONTAINRE_RUNS_ROOT", str(tmp_path / "custom"))
+    assert default_runs_root() == tmp_path / "custom"
+    monkeypatch.delenv("CONTAINRE_RUNS_ROOT")
+    assert default_runs_root().name == "runs"  # falls back to the home default
 
 
 class TimeoutRuntime:
