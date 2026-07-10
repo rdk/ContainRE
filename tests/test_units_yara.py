@@ -31,3 +31,19 @@ def test_yara_scanner_unit(tmp_path):
     assert hits[0]["severity"] == "high" and hits[0]["attack"] == ["T1055"]
     assert hits[0]["refs"] == {"snapshot_id": "snap-1"}
     assert sc.scan(b"nothing to see", {}) == []
+
+
+def test_bad_custom_rule_does_not_disable_builtin_or_good_rules(tmp_path):
+    if not have_yara():
+        pytest.skip("yara-python not installed")
+    good = tmp_path / "good.yar"
+    good.write_text(_RULES)
+    bad = tmp_path / "bad.yar"
+    bad.write_text("rule broken { this is not valid yara }")
+
+    sc = YaraScanner([str(good), str(bad)], use_builtin=False)
+
+    assert sc.enabled()   # the good ruleset still compiled despite the broken one
+    assert any("failed to compile" in w for w in sc.warnings)
+    hits = sc.scan(b"....YARA_MEM_MARKER_containre....", {"snapshot_id": "snap-1"})
+    assert hits and hits[0]["id"] == "yara:mem_marker"

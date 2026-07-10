@@ -38,6 +38,12 @@ class RunSession:
         # The tracer emits from the main thread; the net-sink from worker threads.
         # A re-entrant lock serializes store writes and detector/verdict state.
         self._lock = threading.RLock()
+        # Surface any YARA rule-compile problems as low-severity detections rather
+        # than letting a bad custom rule silently disable scanning.
+        for w in getattr(self.yara, "warnings", []) if self.yara else []:
+            self.record_detection({"detector": "yara", "id": "yara-rule-error",
+                                   "severity": "low", "title": w, "description": w,
+                                   "refs": {}}, None)
 
     # -- event sink ---------------------------------------------------------
     def emit(self, event: Event) -> None:
