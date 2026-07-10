@@ -179,6 +179,26 @@ class BuiltinSink:
             data = conn.recv(4096)
         except OSError:
             pass
+        # An HTTP request line can span TCP segments; if the first bytes are a
+        # partial HTTP method with no header terminator yet, keep reading briefly
+        # so it is classified (and its URL/host IOC recorded) as HTTP rather than
+        # misread as generic TCP. Only extends when it looks like HTTP, so plain
+        # TCP is not penalised.
+        if data and b"\r\n\r\n" not in data:
+            token = data.split(b" ", 1)[0].decode("latin1", "replace")
+            if token and any(m.startswith(token) for m in _HTTP_METHODS):
+                deadline = time.monotonic() + 0.5
+                while (b"\r\n\r\n" not in data and len(data) < 65536
+                       and time.monotonic() < deadline and not self._stop.is_set()):
+                    try:
+                        more = conn.recv(4096)
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    if not more:
+                        break
+                    data += more
         info = self._respond(conn, data)
         self._close(conn)
         if info is not None and tls:
