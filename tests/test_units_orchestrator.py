@@ -12,6 +12,22 @@ from containre.interfaces import RunHandle
 pytestmark = pytest.mark.unit
 
 
+def test_localruntime_warns_about_missing_isolation(tmp_path, monkeypatch):
+    from containre.interfaces import Job
+    from containre.runtime import local as local_mod
+
+    monkeypatch.setattr(local_mod, "configure_tls_plaintext", lambda job: None)
+    monkeypatch.setattr(local_mod.subprocess, "Popen",
+                        lambda *a, **k: type("P", (), {"pid": 4321})())
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    job = Job(run_dir=run_dir, specimen_path="/bin/true", args=[], env={},
+              cwd=str(tmp_path), stdin_path=None, policy={})
+
+    with pytest.warns(local_mod.LocalRuntimeIsolationWarning):
+        local_mod.LocalRuntime().start(job)
+
+
 def test_default_runs_root_honors_env(monkeypatch, tmp_path):
     monkeypatch.setenv("CONTAINRE_RUNS_ROOT", str(tmp_path / "custom"))
     assert default_runs_root() == tmp_path / "custom"
