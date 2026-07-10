@@ -369,6 +369,21 @@ def test_policy_assertions_are_evaluated_and_reported(tmp_path):
     assert "Assertions: `passed`" in rendered
 
 
+def test_detections_max_severity_derives_from_events_not_stale_verdict(tmp_path):
+    run = tmp_path / "run-killed-early"
+    # detection recorded, but the run was hard-killed before finalize wrote the
+    # verdict, so meta.verdict.max_severity is a stale 'info'.
+    _write_run(run, [
+        {"seq": 0, "kind": "detection",
+         "data": {"id": "decoy-access", "severity": "critical", "title": "decoy"}},
+    ], meta={"verdict": {"max_severity": "info", "flags": [], "attack": []}, "status": "killed"})
+
+    summary = summarize_run_dir(run)
+
+    assert summary["metrics"]["detections.count"] == 1
+    assert summary["metrics"]["detections.max_severity"] == "critical"
+
+
 def test_negative_assertion_on_missing_subject_is_error_not_silent_pass():
     summary = {"metrics": {"artifacts.names": ["exfil.dat"]}}
     result = evaluate_assertions(summary, [
