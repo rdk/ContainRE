@@ -35,6 +35,15 @@ def test_strings_no_false_truncation_at_exact_cap(tmp_path):
     assert any("truncated" in w for w in warns2)       # genuinely truncated -> warn
 
 
+def test_symbol_matches_is_word_bounded_not_substring():
+    assert _symbol_matches("connect", "connect")               # exact
+    assert _symbol_matches("connect@plt", "connect")           # normalized exact
+    assert _symbol_matches("std::vector<int>::push_back", "push_back")  # word boundary
+    assert not _symbol_matches("reconnect", "connect")         # no longer over-matches
+    assert not _symbol_matches("disconnect", "connect")
+    assert not _symbol_matches("connector", "connect")
+
+
 def test_call_re_captures_full_demangled_target_with_nested_brackets():
     line = ("  138e:\te8 01 02 03 04       \tcallq  1234 "
             "<std::vector<int, std::allocator<int> >::push_back(int const&)>")
