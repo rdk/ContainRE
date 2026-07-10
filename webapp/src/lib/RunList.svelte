@@ -23,11 +23,12 @@
       if (trimmedPolicy) body.policy = JSON.parse(trimmedPolicy);
       if (trimmedBinary) {
         body.binary = trimmedBinary;
-        body.net = net;
-        body.mitm = net === 'simulate' && mitm;
-        // Only send decoys when the field is non-empty: sending [] would override
-        // (wipe) any files.decoys set in the pasted policy, silently disabling
-        // canary/ransomware detection for the run.
+        // The form's net/mitm/decoys are quick overrides for the bare-binary
+        // case. When a full policy is ALSO pasted, treat it as the source of
+        // truth and don't silently override its network posture / decoys with the
+        // form defaults. mitm is only sent when explicitly enabled.
+        if (!trimmedPolicy) body.net = net;
+        if (net === 'simulate' && mitm) body.mitm = true;
         const decoyList = decoys.split(',').map((s) => s.trim()).filter(Boolean);
         if (decoyList.length) body.decoys = decoyList;
         if (l2 !== 'off') {
