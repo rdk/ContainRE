@@ -19,15 +19,42 @@
   let streamErr = $state('');
   let ws: Stream | null = null;
 
-  const detections = $derived(events.filter((e) => e.kind === 'detection'));
-  const instrs = $derived(events.filter((e) => e.kind === 'instr'));
-  const snapshots = $derived(events.filter((e) => e.kind === 'mem' && e.data.op === 'snapshot'));
-  const kinds = $derived.by(() => {
-    const c: Record<string, number> = {};
-    for (const e of events) c[e.kind] = (c[e.kind] ?? 0) + 1;
-    return Object.entries(c).sort((a, b) => b[1] - a[1]);
-  });
+  // Maintained incrementally (not $derived over the whole events array, which was
+  // O(n) per message => O(n^2) and froze the tab on a chatty/L2-singlestep run).
+  let detections = $state<Ev[]>([]);
+  let snapshots = $state<Ev[]>([]);
+  let instrs = $state<Ev[]>([]);
+  let kindCounts = $state<Record<string, number>>({});
+  const EVENT_CAP = 4000;   // bound the retained timeline buffer
+  const INSTR_CAP = 20000;
+
+  const kinds = $derived(Object.entries(kindCounts).sort((a, b) => b[1] - a[1]));
   const shown = $derived((kindFilter ? events.filter((e) => e.kind === kindFilter) : events).slice(-800));
+
+  let pending: Ev[] = [];
+  let flushScheduled = false;
+  function ingest(e: Ev) {
+    kindCounts[e.kind] = (kindCounts[e.kind] ?? 0) + 1;
+    if (e.kind === 'detection') detections.push(e);
+    else if (e.kind === 'mem' && e.data?.op === 'snapshot') snapshots.push(e);
+    else if (e.kind === 'instr') {
+      instrs.push(e);
+      if (instrs.length > INSTR_CAP) instrs.splice(0, instrs.length - INSTR_CAP);
+    }
+    pending.push(e);
+    if (!flushScheduled) {
+      flushScheduled = true;
+      requestAnimationFrame(flushEvents);
+    }
+  }
+  function flushEvents() {
+    flushScheduled = false;
+    if (!pending.length) return;
+    let next = events.concat(pending);   // one array copy per frame, not per event
+    pending = [];
+    if (next.length > EVENT_CAP) next = next.slice(next.length - EVENT_CAP);
+    events = next;
+  }
 
   async function loadFiles() {
     try { artifacts = (await api.artifacts(id)).artifacts; } catch {}
@@ -49,7 +76,7 @@
   onMount(() => {
     api.run(id).then((m) => (meta = m)).catch(() => {});
     ws = stream(id, 0,
-      (e) => { events = [...events, e]; },
+      (e) => ingest(e),
       (s, a) => {
         status = s; active = a; streamErr = '';
         if (['finished', 'killed', 'error'].includes(s) && !a) {
