@@ -55,6 +55,17 @@ def test_create_run_with_missing_binary_returns_400_not_500(tmp_path):
     assert resp.status_code == 400
 
 
+def test_create_run_with_directory_binary_returns_400_not_500(tmp_path):
+    # a directory path exists (so no FileNotFoundError) but read_bytes() raises
+    # IsADirectoryError - a non-FileNotFoundError OSError that the pre-fix
+    # single `except FileNotFoundError` would have let escape as a 500.
+    d = tmp_path / "adir"
+    d.mkdir()
+    client = TestClient(create_app(runs_root=tmp_path / "runs", runtime_name="local"))
+    resp = client.post("/api/runs", json={"binary": str(d)})
+    assert resp.status_code == 400
+
+
 def test_websocket_rejects_malformed_since(tmp_path):
     runs = tmp_path / "runs"
     _terminal_run(runs, "run", 1)
