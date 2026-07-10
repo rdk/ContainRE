@@ -101,6 +101,13 @@ def run(
         w = policy["trace"]["l2"].setdefault("window", {})
         w["addr_start"], w["addr_end"] = start.strip(), end.strip()
 
+    # Validate the EFFECTIVE policy after overrides (mirrors the API's
+    # _build_policy), so e.g. `--net bogus` is rejected up front rather than
+    # silently persisted and run with fall-through behavior.
+    errors = P.validate(policy)
+    if errors:
+        raise typer.BadParameter("invalid effective policy:\n  " + "\n  ".join(errors))
+
     result = execute(policy, runs_root=runs_root or default_runs_root(),
                      runtime=get_runtime(runtime))
     meta = result.meta
