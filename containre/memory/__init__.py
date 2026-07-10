@@ -1,3 +1,3 @@
-from .snapshot import blob_suffix, capture
+from .snapshot import blob_suffix, capture, compress
 
-__all__ = ["blob_suffix", "capture"]
+__all__ = ["blob_suffix", "capture", "compress"]
