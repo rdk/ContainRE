@@ -34,6 +34,21 @@ def test_list_marks_active_runs(tmp_path):
     assert by_id["finished-run"]["active"] is False
 
 
+def test_detections_and_snapshots_scan_past_the_kind_filter(tmp_path):
+    _write_meta(tmp_path, "run")
+    lines = [{"seq": i, "kind": "proc", "data": {"op": "noop"}} for i in range(10)]
+    lines.append({"seq": 10, "kind": "mem", "data": {"op": "snapshot", "snapshot_id": "snap-a"}})
+    lines.append({"seq": 11, "kind": "detection", "data": {"id": "decoy-access", "severity": "critical"}})
+    (tmp_path / "run" / "events.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    manager = RunManager(runs_root=tmp_path, max_concurrent=1)
+
+    # A tiny per-kind limit must still find the detection/snapshot past the 10
+    # preceding proc events - i.e. the cap counts the requested kind, not total.
+    assert [e["seq"] for e in manager.events("run", limit=1, kind="detection")["events"]] == [11]
+    assert [e["seq"] for e in manager.detections("run")] == [11]
+    assert [e["data"]["snapshot_id"] for e in manager.snapshots("run")] == ["snap-a"]
+
+
 def test_events_skips_malformed_lines(tmp_path):
     _write_meta(tmp_path, "run")
     (tmp_path / "run" / "events.jsonl").write_text(

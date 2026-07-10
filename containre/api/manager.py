@@ -174,12 +174,14 @@ class RunManager:
         return {"events": events, "next_seq": next_seq}
 
     def snapshots(self, run_id: str) -> list[dict]:
-        return [e for e in self.events(run_id, limit=100000)["events"]
-                if e["kind"] == "mem" and e["data"].get("op") == "snapshot"]
+        # Filter by kind inside events() so the cap bounds mem events, not total
+        # events scanned; otherwise a specimen could bury its snapshots past the
+        # 100000th (any-kind) event and hide them from this endpoint.
+        return [e for e in self.events(run_id, limit=100000, kind="mem")["events"]
+                if e["data"].get("op") == "snapshot"]
 
     def detections(self, run_id: str) -> list[dict]:
-        return [e for e in self.events(run_id, limit=100000)["events"]
-                if e["kind"] == "detection"]
+        return self.events(run_id, limit=100000, kind="detection")["events"]
 
     def summary(self, run_id: str, retry_threshold: int = 3) -> dict | None:
         if not (self._run_dir(run_id) / "meta.json").exists():
