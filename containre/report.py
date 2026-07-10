@@ -56,6 +56,28 @@ def _read_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def _dedup_events_by_seq(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Real events carry unique, store-assigned monotonic seq numbers. A specimen
+    can forge lines in its own events.jsonl (it shares the run dir under Docker
+    DAC_OVERRIDE), but cannot reproduce the trusted store's seq allocation, so
+    forged lines surface as duplicate or non-integer seq. Keep the first
+    occurrence of each seq (the tracer writes real events before a later forgery)
+    and report how many suspect lines were dropped. This makes forgery
+    tamper-evident; full prevention requires denying the specimen run-dir write
+    access (privilege separation)."""
+    seen: set[int] = set()
+    kept: list[dict[str, Any]] = []
+    suspect = 0
+    for e in events:
+        seq = e.get("seq")
+        if not isinstance(seq, int) or seq in seen:
+            suspect += 1
+            continue
+        seen.add(seq)
+        kept.append(e)
+    return kept, suspect
+
+
 def _endpoint_for(data: dict[str, Any]) -> str:
     return str(data.get("raddr") or data.get("laddr") or "")
 
@@ -352,6 +374,7 @@ def _metrics(summary: dict[str, Any]) -> dict[str, Any]:
         "duration_s": summary.get("duration_s"),
         "events.count": summary.get("event_count", 0),
         "events.by_kind": summary.get("events_by_kind", {}),
+        "integrity.suspect_event_lines": summary.get("suspect_event_lines", 0),
         "counts.events": counts.get("events", 0),
         "counts.detections": counts.get("detections", 0),
         "counts.artifacts": counts.get("artifacts", 0),
@@ -762,6 +785,9 @@ def summarize_run_dir(
     meta = _read_json(run_dir / "meta.json")
     policy = _read_policy(run_dir)
     events = _read_events(run_dir / "events.jsonl")
+    # Drop forged/duplicate-seq lines so tampering can't inflate or deflate the
+    # metrics and assertion subjects that derive from the event stream.
+    events, suspect_event_lines = _dedup_events_by_seq(events)
 
     by_kind = Counter(str(e.get("kind", "")) for e in events)
     network = _network_rows(events)
@@ -790,6 +816,7 @@ def summarize_run_dir(
         "verdict": meta.get("verdict", {}),
         "instrumentation": meta.get("instrumentation", {}),
         "event_count": len(events),
+        "suspect_event_lines": suspect_event_lines,
         "events_by_kind": dict(sorted(by_kind.items())),
         "network": network,
         "network_sink_interactions": _sink_interactions(events),
