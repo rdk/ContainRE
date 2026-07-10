@@ -312,6 +312,33 @@ def test_disk_mb_off_by_default():
     assert tracer.disk_mb == 0
 
 
+def test_seek_to_carries_pending_signal_out_instead_of_dropping_it():
+    from ptrace.debugger import ProcessSignal
+    tracer, _ = _tracer()
+    tracer._md = None   # _l2_gate_egress_at_rip becomes a no-op (no disassembly)
+
+    proc = FakeProcess()
+    rips = [0x1000, 0x2000]           # step once, then rip == target
+    proc.getreg = lambda name: rips.pop(0) if name == "rip" else 0
+    proc.singleStep = lambda: None
+
+    sig = ProcessSignal(20, proc)     # a non-SIGTRAP signal delivered mid-seek
+    sig.name = "SIGCHLD"
+
+    class _Dbg:
+        def waitProcessEvent(self, pid=None):
+            return sig
+
+    tracer.debugger = _Dbg()
+
+    outcome = tracer._seek_to(proc, 0x2000)
+
+    assert outcome == "reached"
+    # the signal that arrived on the last step before reaching target must be
+    # carried out for re-injection, not silently dropped.
+    assert tracer._seek_pending_signal == 20
+
+
 def test_l2_gate_egress_neutralizes_blocked_connect():
     # a connect single-stepped in an L2 window must be gated: recorded, killed
     # (if configured), and the syscall number invalidated so it never egresses.
