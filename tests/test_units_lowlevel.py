@@ -9,12 +9,31 @@ import struct
 
 import pytest
 
+from containre import contracts
 from containre.control.elf import elf_facts
 from containre.control.verdict import Verdict
 from containre.memory import snapshot as snap
 from containre.model import Event, Kind
 from containre.store import RunStore
 from containre.tracer import l2, syscalls as sc
+
+
+def test_queued_meta_with_null_runtime_conforms():
+    if contracts.find_contracts_dir() is None:
+        pytest.skip("contracts dir not found")
+    # exactly what create_run writes before a backend is assigned / docker absent.
+    meta = {
+        "schema_version": 1,
+        "run_id": "20260101T000000Z_x_abc123_0000",
+        "status": "queued",
+        "specimen": {"path": "/bin/true", "sha256": "0" * 64, "size": 1, "elf": {}},
+        "image": None,
+        "runtime": None,
+        "policy_ref": "policy.yaml",
+        "created_wall": 1,
+        "host": {"kernel": "test", "docker": None, "criu": None, "containre": "0"},
+    }
+    assert contracts.validate(meta, "meta.v1.schema.json") == []
 
 pytestmark = pytest.mark.unit
 
