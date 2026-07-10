@@ -279,19 +279,20 @@ suspicious or proprietary specimens.
 
 ## Testing Workflows
 
-Run unit tests only:
+Run unit tests only (the default):
 
 ```bash
-scripts/test-unit.sh
+./run_tests.sh
 ```
 
-Run the extended local specimen suite:
+Run the specimen/docker integration suite as well (rebuilds specimens first):
 
 ```bash
-scripts/test-specimens-extended.sh
+./run_tests.sh --integration        # unit + integration
+./run_tests.sh --only-integration   # integration only
 ```
 
-Run the full Python suite:
+Run the full Python suite directly:
 
 ```bash
 uv run pytest

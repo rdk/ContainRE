@@ -163,10 +163,24 @@ Useful endpoints:
 
 ## Testing
 
-```bash
-scripts/test-unit.sh
-scripts/test-specimens-extended.sh
+`./run_tests.sh` runs the fast, offline **unit** tests by default; the slower
+**integration** group (specimen binaries compiled and run under the ptrace
+harness — the `docker` subset also needs a Docker daemon) is off unless asked
+for. Any extra arguments are forwarded to pytest.
 
+```bash
+./run_tests.sh                     # unit tests only (default)
+./run_tests.sh --integration       # unit + integration
+./run_tests.sh --only-integration  # integration only (rebuilds specimens first)
+./run_tests.sh --all               # both groups (alias for --integration)
+./run_tests.sh --integration --no-docker   # skip the Docker-daemon subset
+./run_tests.sh -v -k policy        # unit tests, extra args passed through to pytest
+./run_tests.sh --help              # full list of group flags
+```
+
+Other checks:
+
+```bash
 uv run pytest
 uv run ruff check containre tests
 python3 contracts/validate.py
