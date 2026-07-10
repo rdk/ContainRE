@@ -31,18 +31,30 @@ def test_injection_detector_ignores_non_exec():
     assert det.feed({"kind": "mem", "seq": 1, "data": {"op": "map", "region": {"perms": "rw-"}}}) == []
 
 
-def test_decoy_detector_flags_read_as_high_and_write_as_critical():
+def _file(seq, op, path="/w/wallet.dat", decoy=True):
+    return {"kind": "file", "seq": seq, "data": {"op": op, "path": path, "decoy": decoy}}
+
+
+def test_decoy_detector_flags_open_as_high_and_write_as_critical():
     det = DecoyDetector()
-    read = det.feed({"kind": "file", "seq": 1, "data": {"op": "read", "path": "/w/wallet.dat", "decoy": True}})
-    assert read and read[0]["severity"] == "high" and read[0]["id"] == "decoy-access"
+    # op="open" is the ACTUAL decoy-access event the tracer emits (not "read").
+    opened = det.feed(_file(1, "open"))
+    assert opened and opened[0]["severity"] == "high" and opened[0]["id"] == "decoy-access"
     # a later write to the same decoy still escalates to critical (not deduped away)
-    write = det.feed({"kind": "file", "seq": 2, "data": {"op": "write", "path": "/w/wallet.dat", "decoy": True}})
+    write = det.feed(_file(2, "write"))
     assert write and write[0]["severity"] == "critical"
-    # a second read of the same decoy is deduped
-    assert det.feed({"kind": "file", "seq": 3, "data": {"op": "read", "path": "/w/wallet.dat", "decoy": True}}) == []
+    # a second open of the same decoy is deduped
+    assert det.feed(_file(3, "open")) == []
+
+
+def test_decoy_detector_flags_truncate_wipe_as_critical():
+    # a bare truncate("/work/wallet.dat", 0) wiper must raise a critical detection.
+    det = DecoyDetector()
+    out = det.feed(_file(1, "truncate"))
+    assert out and out[0]["severity"] == "critical" and out[0]["id"] == "decoy-access"
 
 
 def test_decoy_detector_ignores_non_decoy_and_unrelated_ops():
     det = DecoyDetector()
-    assert det.feed({"kind": "file", "seq": 1, "data": {"op": "read", "path": "/w/x", "decoy": False}}) == []
-    assert det.feed({"kind": "file", "seq": 2, "data": {"op": "mkdir", "path": "/w/d", "decoy": True}}) == []
+    assert det.feed(_file(1, "open", decoy=False)) == []
+    assert det.feed(_file(2, "mkdir")) == []
