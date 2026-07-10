@@ -53,9 +53,23 @@ class L2Engine:
         syscall number (rax = -1) so the kernel skips it and returns -ENOSYS - fail
         closed, no real egress. Records the attempt as a NET event."""
         try:
-            name = sc.EGRESS_SYSCALL_NRS.get(process.getreg("rax"))
+            nr = process.getreg("rax")
         except Exception:
             return
+        # io_uring_setup would otherwise let the specimen create a ring during the
+        # window and egress asynchronously later (io_uring_enter is decoded
+        # nowhere), reopening the bypass the L1 handler closes. Deny it here too.
+        if nr == sc.IO_URING_SETUP_NR:
+            if self.net_posture != "allow":
+                self.emit(Event(Kind.SYSCALL, {"name": "io_uring_setup", "phase": "enter",
+                                               "blocked": True, "via": "l2-singlestep"},
+                                pid=process.pid))
+                try:
+                    process.setreg("rax", _MASK)
+                except Exception:
+                    pass
+            return
+        name = sc.EGRESS_SYSCALL_NRS.get(nr)
         if name is None:
             return
         try:
@@ -67,10 +81,10 @@ class L2Engine:
                 dests = [self._read_addr(process, r8, process.getreg("r9"))] if r8 else []
             elif name == "sendmsg":
                 dests = [self._read_msghdr_addr(process, process.getreg("rsi"))]
-            else:  # sendmmsg
+            else:  # sendmmsg: match the L1 cap (kernel UIO_MAXIOV=1024), not 64
                 vlen = int(process.getreg("rdx"))
                 vec = process.getreg("rsi")
-                dests = [self._read_mmsghdr_addr(process, vec, i) for i in range(min(vlen, 64))]
+                dests = [self._read_mmsghdr_addr(process, vec, i) for i in range(min(vlen, 1024))]
         except Exception:
             return
         block = False
