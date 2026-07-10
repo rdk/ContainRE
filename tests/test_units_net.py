@@ -63,6 +63,24 @@ def test_builtin_sink_http_standalone():
     assert seen and seen[0]["op"] == "http" and seen[0]["http"]["path"] == "/x"
 
 
+def test_builtin_sink_classifies_http_split_across_segments():
+    seen = []
+    sink = BuiltinSink(on_interaction=seen.append)
+    sink.start()
+    try:
+        c = socket.create_connection(("127.0.0.1", sink.port), timeout=2)
+        c.sendall(b"GE")             # partial method in the first segment
+        time.sleep(0.05)
+        c.sendall(b"T /y HTTP/1.0\r\nHost: h\r\n\r\n")
+        resp = c.recv(200)
+        c.close()
+    finally:
+        sink.stop()
+    assert b"HTTP/1.1 200 OK" in resp
+    # must still be recognised as HTTP (so the URL/host IOC is recorded), not TCP
+    assert seen and seen[0]["op"] == "http" and seen[0]["http"]["path"] == "/y"
+
+
 def test_builtin_sink_can_bind_fixed_loopback_port():
     seen = []
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
