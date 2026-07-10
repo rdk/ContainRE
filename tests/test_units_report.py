@@ -369,6 +369,28 @@ def test_policy_assertions_are_evaluated_and_reported(tmp_path):
     assert "Assertions: `passed`" in rendered
 
 
+def test_forged_duplicate_seq_lines_are_dropped_and_counted(tmp_path):
+    run = tmp_path / "run-forged"
+    _write_run(run, [
+        {"seq": 0, "kind": "net", "data": {"op": "connect", "raddr": "1.2.3.4:443",
+                                           "decision": "allow"}},
+        {"seq": 1, "kind": "proc", "data": {"op": "exit", "exit_code": 0}},
+    ])
+    # specimen forges lines in its own events.jsonl: a duplicate seq (rewrite the
+    # allow as a block) and a non-integer seq.
+    with (run / "events.jsonl").open("a") as fh:
+        fh.write(json.dumps({"seq": 0, "kind": "net",
+                             "data": {"op": "connect", "raddr": "1.2.3.4:443",
+                                      "decision": "block"}}) + "\n")
+        fh.write(json.dumps({"seq": "x", "kind": "net", "data": {"op": "connect"}}) + "\n")
+
+    summary = summarize_run_dir(run)
+
+    assert summary["metrics"]["integrity.suspect_event_lines"] == 2
+    # the real (first) allow event survives; the forged block does not overwrite it.
+    assert summary["metrics"]["network.real_allowed_remote_endpoint_event_count"] == 1
+
+
 def test_detections_max_severity_derives_from_events_not_stale_verdict(tmp_path):
     run = tmp_path / "run-killed-early"
     # detection recorded, but the run was hard-killed before finalize wrote the
