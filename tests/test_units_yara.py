@@ -33,6 +33,14 @@ def test_yara_scanner_unit(tmp_path):
     assert sc.scan(b"nothing to see", {}) == []
 
 
+def test_scanner_warns_on_a_missing_rule_file(tmp_path):
+    if not have_yara():
+        pytest.skip("yara-python not installed")
+    sc = YaraScanner([str(tmp_path / "nope.yar")], use_builtin=False)
+    assert not sc.enabled()   # nothing compiled
+    assert any("not found" in w for w in sc.warnings)
+
+
 def test_bad_custom_rule_does_not_disable_builtin_or_good_rules(tmp_path):
     if not have_yara():
         pytest.skip("yara-python not installed")

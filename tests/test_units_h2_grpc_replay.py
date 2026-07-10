@@ -146,3 +146,19 @@ def test_cli_infer_h2_grpc_replay_no_trace_requires_endpoint(tmp_path):
 
     assert result.exit_code != 0
     assert "--no-trace requires --service-host and --service-port" in result.output
+
+
+def test_infer_tolerates_malformed_and_binary_capture(tmp_path):
+    # non-hex garbage, a dict record with invalid hex, and raw non-UTF8 bytes
+    # must not raise out of the CLI/inference (they are skipped).
+    cap = tmp_path / "bad.capture"
+    cap.write_bytes(
+        b"not-hex-zz gg\n"
+        + json.dumps({"direction": "out", "hex": "zzzz"}).encode() + b"\n"
+        + b"\xff\xfe raw binary \x00 line\n"
+    )
+
+    result = infer_h2_grpc_replay(cap)   # must not raise
+
+    assert result["frame_count"] == 0
+    assert "connection_count" in result
