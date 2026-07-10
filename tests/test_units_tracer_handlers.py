@@ -63,6 +63,7 @@ class FakeProcess:
         self.strings = strings or {}
         self.reads = reads or {}
         self.regs = []
+        self.writes = {}
 
     def readCString(self, addr, maxlen=4096):
         return self.strings.get(addr, "")
@@ -73,6 +74,10 @@ class FakeProcess:
 
     def setreg(self, reg, value):
         self.regs.append((reg, value))
+
+    def writeBytes(self, addr, data):
+        self.writes[addr] = bytes(data)
+        return len(data)
 
 
 def _tracer(**policy_overrides):
@@ -216,6 +221,37 @@ def test_handle_net_sendmmsg_blocks_whole_batch_if_any_message_blocked():
     assert [e.data["raddr"] for e in events] == ["203.0.113.22:80", "203.0.113.23:443"]
     assert all(e.data["decision"] == "block" for e in events)
     assert proc.regs, "one blocked message must fail the whole batched syscall closed"
+
+
+def test_is_multithreaded_fails_closed_on_missing_task_dir():
+    tracer, _ = _tracer()
+    assert tracer._is_multithreaded(999999999) is True
+
+
+def test_simulate_connect_blocks_instead_of_racy_redirect_when_multithreaded():
+    tracer, events = _tracer(network={"posture": "simulate", "allow": []})
+    tracer.sink_addr = ("127.0.0.1", 9999)
+    tracer._is_multithreaded = lambda pid: True   # racy: must block, not redirect
+    proc = FakeProcess(reads={0x5000: _sockaddr_in("203.0.113.9", 443)})
+
+    tracer._handle_net_egress(proc, _syscall("connect", 3, 0x5000, 16))
+
+    assert "redirected_to" not in events[-1].data
+    assert tracer._pending_block == {proc.pid: sc.ECONNREFUSED}
+    assert not proc.writes, "must not rewrite the sockaddr for a multithreaded specimen"
+
+
+def test_simulate_connect_redirects_to_sink_when_single_threaded():
+    tracer, events = _tracer(network={"posture": "simulate", "allow": []})
+    tracer.sink_addr = ("127.0.0.1", 9999)
+    tracer._is_multithreaded = lambda pid: False  # safe: redirect to the sink
+    proc = FakeProcess(reads={0x5000: _sockaddr_in("203.0.113.9", 443)})
+
+    tracer._handle_net_egress(proc, _syscall("connect", 3, 0x5000, 16))
+
+    assert events[-1].data.get("redirected_to") == "127.0.0.1:9999"
+    assert proc.writes.get(0x5000), "single-threaded simulate connect should rewrite to the sink"
+    assert tracer._pending_block == {}, "a redirected connect must not be blocked"
 
 
 def test_io_uring_setup_blocked_under_restricting_posture():

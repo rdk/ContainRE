@@ -331,9 +331,15 @@ class PtraceTracer(L2Engine):
             return
         decision = self._net_decision(family, ip, target)
         # simulate: redirect the connect to the local sink so it succeeds and the
-        # specimen "talks" to our responder instead of failing.
+        # specimen "talks" to our responder instead of failing. The redirect works
+        # by rewriting the sockaddr in tracee memory and resuming, which is racy if
+        # a CLONE_VM sibling can restore the real destination before the kernel
+        # copies it in (a fork child has a COW copy and cannot). For a
+        # multithreaded specimen we therefore skip the redirect and fall through to
+        # the race-immune block below: containment beats simulate fidelity here.
         redirected = None
-        if decision == "simulated" and self.sink_addr and name == "connect":
+        if (decision == "simulated" and self.sink_addr and name == "connect"
+                and not self._is_multithreaded(process.pid)):
             redirected = self._redirect_connect(process, ptr, family)
         data = {"op": "connect" if name == "connect" else "send",
                 "proto": sc.proto_name(family), "raddr": target, "decision": decision}
@@ -458,6 +464,15 @@ class PtraceTracer(L2Engine):
             data["errno_name"] = errno_mod.errorcode.get(so_error, str(so_error))
             self.flows.pop((process.pid, fd), None)
         self.emit(Event(Kind.NET, data, pid=process.pid))
+
+    def _is_multithreaded(self, pid: int) -> bool:
+        """True if the specimen task shares its address space with sibling threads
+        (any CLONE_VM sibling can race an in-place sockaddr rewrite). Fails closed:
+        if /proc/<tid>/task can't be read we assume it is racy."""
+        try:
+            return len(os.listdir(f"/proc/{pid}/task")) > 1
+        except OSError:
+            return True
 
     def _redirect_connect(self, process, ptr: int, family: int) -> str | None:
         """Rewrite the connect() sockaddr in the specimen's memory to point at the
