@@ -310,15 +310,17 @@ class RunManager:
         try:
             header, body = snap.load(matches[0])
             data, region = snap.region_slice(header, body, base)
+            # int(region["base"], 16) is inside the guard too: a corrupt header
+            # whose region lacks/mangles "base" must not 500 the endpoint.
+            base_int = int(region["base"], 16) if region else 0
+            return {
+                "snapshot_id": snapshot_id,
+                "regions": header.get("regions", []),
+                "region": region,
+                "hexdump": snap.hexdump(data, base=base_int),
+            }
         except Exception:
             # A snapshot that can't be read (zstd blob on a host without
             # zstandard, or a corrupt/truncated header) must degrade to 404, not
             # crash the endpoint with a 500.
             return None
-        base_int = int(region["base"], 16) if region else 0
-        return {
-            "snapshot_id": snapshot_id,
-            "regions": header.get("regions", []),
-            "region": region,
-            "hexdump": snap.hexdump(data, base=base_int),
-        }
