@@ -120,6 +120,33 @@ def test_elf_facts_non_elf(tmp_path):
     assert facts["arch"] is None and facts["linkage"] == "unknown"
 
 
+def test_elf_facts_reads_only_a_bounded_prefix(tmp_path):
+    # A PT_INTERP whose interp string sits BEYOND the 1MB read cap must not be
+    # resolved - proving elf_facts doesn't load the whole (multi-MB) file, which
+    # would let a huge hostile binary OOM the harness.
+    interp_off = 1_500_000
+    data = bytearray(interp_off + 64)
+    data[0:4] = b"\x7fELF"
+    data[4] = 2   # 64-bit
+    data[5] = 1   # little-endian
+    struct.pack_into("<H", data, 16, 3)          # ET_DYN
+    struct.pack_into("<H", data, 18, 0x3E)       # x86-64
+    struct.pack_into("<Q", data, 32, 64)         # e_phoff
+    struct.pack_into("<H", data, 54, 56)         # e_phentsize
+    struct.pack_into("<H", data, 56, 1)          # e_phnum
+    struct.pack_into("<I", data, 64, 3)          # PT_INTERP
+    struct.pack_into("<Q", data, 72, interp_off)  # p_offset (off+8), beyond the cap
+    struct.pack_into("<Q", data, 96, 18)          # p_filesz (off+32)
+    data[interp_off:interp_off + 18] = b"/lib64/ld-linux.so"
+    p = tmp_path / "big.elf"
+    p.write_bytes(bytes(data))
+
+    facts = elf_facts(p)
+
+    assert facts["arch"] == "x86-64"   # header (in the prefix) parsed fine
+    assert facts["interp"] is None     # interp past the cap not read -> read is bounded
+
+
 def test_elf_facts_survives_truncated_program_header(tmp_path):
     # 72-byte ELF64 claiming one 56-byte PT_INTERP program header at e_phoff=64,
     # but the file is too short to hold it -> used to raise struct.error.

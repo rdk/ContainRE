@@ -10,13 +10,19 @@ from pathlib import Path
 
 _E_MACHINE = {0x3E: "x86-64", 0xB7: "aarch64", 0x03: "x86", 0x28: "arm"}
 _PT_INTERP = 3
+# Only the ELF header + program-header table + interp string are needed, all of
+# which sit in a prefix for normal binaries. Read a bounded prefix so a huge
+# hostile file can't OOM the harness (a phdr/interp beyond it just yields partial
+# facts, which the callers already tolerate).
+_MAX_ELF_READ = 1024 * 1024
 
 
 def elf_facts(path: str | Path) -> dict:
     facts: dict = {"arch": None, "linkage": "unknown", "libc": "unknown",
                    "interp": None, "pie": None}
     try:
-        data = Path(path).read_bytes()
+        with Path(path).open("rb") as fh:
+            data = fh.read(_MAX_ELF_READ)
     except OSError:
         return facts
     if len(data) < 64 or data[:4] != b"\x7fELF":
