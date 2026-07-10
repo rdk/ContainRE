@@ -183,10 +183,13 @@ class L2Engine:
                 except Exception:
                     continue
                 if new != old:
+                    # Use full-width hex (not hx(), which masks to 64 bits) so
+                    # SIMD/AVX stores (size 16/32) keep their high bytes; hx()
+                    # truncation rendered them as identical (phantom no-op) values.
                     mem_writes.append({
                         "addr": hx(addr), "size": size,
-                        "old": hx(int.from_bytes(old, "little")),
-                        "new": hx(int.from_bytes(new, "little")),
+                        "old": hex(int.from_bytes(old, "little")),
+                        "new": hex(int.from_bytes(new, "little")),
                     })
             data = l2mod.instr_data(ip, disasm, window_id, "singlestep",
                                     before, after, mem_writes)

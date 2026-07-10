@@ -110,6 +110,16 @@ def _blob(tmp_path):
     return path, header, body
 
 
+def test_wide_mem_write_values_are_not_truncated_to_64_bits():
+    from containre.model import hx
+    old = bytes(16)                       # 16-byte SIMD store, all zero
+    new = bytes(8) + b"\x01" + bytes(7)   # differs only in a byte above the low 64 bits
+    # hx() masks to 64 bits, rendering both as 0x0 -> a phantom no-op write...
+    assert hx(int.from_bytes(old, "little")) == hx(int.from_bytes(new, "little")) == "0x0"
+    # ...whereas full-width hex (the fix) distinguishes them.
+    assert hex(int.from_bytes(old, "little")) != hex(int.from_bytes(new, "little"))
+
+
 def test_capture_skips_high_kernel_addresses_without_crashing(monkeypatch):
     import os
     # a [vsyscall]-style region at 0xffffffffff600000 (>= 2**63) must be skipped,
