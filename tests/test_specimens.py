@@ -44,7 +44,9 @@ def test_filewriter_file_events(harness):
 
 
 def test_filewriter_decoy_detection(harness):
-    r = harness("filewriter", files={"decoys": ["wallet.dat"]})
+    # attack_tags defaults off (SPEC §10); opt in to exercise the ATT&CK mapping.
+    r = harness("filewriter", files={"decoys": ["wallet.dat"]},
+                detect={"attack_tags": True})
     # the decoy write is flagged on the event itself...
     assert any(d["op"] == "write" and d.get("decoy") and d["path"].endswith("wallet.dat")
                for d in _files(r))

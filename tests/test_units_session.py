@@ -42,6 +42,54 @@ def test_emit_feeds_detectors_and_updates_verdict(tmp_path):
         session.store.close()
 
 
+def _decoy_write(work):
+    return Event(Kind.FILE, {"op": "write", "path": str(work / "wallet.dat"),
+                             "size": 4, "decoy": True}, pid=1)
+
+
+def test_detect_heuristics_flag_disables_heuristic_detectors(tmp_path):
+    session, work = _session(tmp_path, detect={"yara": False, "heuristics": False})
+    try:
+        session.emit(_decoy_write(work))
+        assert [e for e in _events(session) if e["kind"] == Kind.DETECTION] == []
+    finally:
+        session.store.close()
+
+
+def test_detect_iocs_flag_disables_egress_detector(tmp_path):
+    session, _ = _session(tmp_path, detect={"yara": False, "iocs": False})
+    try:
+        session.emit(Event(Kind.NET, {"op": "connect", "raddr": "1.2.3.4:80",
+                                      "decision": "block"}, pid=1))
+        dets = [e for e in _events(session) if e["kind"] == Kind.DETECTION]
+        assert not any(d["data"]["id"] == "network-egress" for d in dets)
+    finally:
+        session.store.close()
+
+
+def test_attack_tags_off_strips_att_ck_from_detections_and_verdict(tmp_path):
+    session, work = _session(tmp_path, detect={"yara": False})  # attack_tags default off
+    try:
+        session.emit(_decoy_write(work))
+        det = [e for e in _events(session) if e["kind"] == Kind.DETECTION][0]
+        assert "attack" not in det["data"]
+        assert session.verdict.to_dict()["attack"] == []
+        assert "decoy-hit" in session.verdict.to_dict()["flags"]  # flags still work
+    finally:
+        session.store.close()
+
+
+def test_attack_tags_on_keeps_att_ck_tags(tmp_path):
+    session, work = _session(tmp_path, detect={"yara": False, "attack_tags": True})
+    try:
+        session.emit(_decoy_write(work))
+        det = [e for e in _events(session) if e["kind"] == Kind.DETECTION][0]
+        assert det["data"]["attack"] == ["T1657"]
+        assert session.verdict.to_dict()["attack"] == ["T1657"]
+    finally:
+        session.store.close()
+
+
 def test_capture_artifacts_collects_written_workdir_files(tmp_path):
     session, work = _session(tmp_path)
     payload = work / "payload.bin"
