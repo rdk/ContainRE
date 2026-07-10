@@ -168,7 +168,11 @@ class BuiltinSink:
                                              "tls": True, "note": "tls handshake failed"})
                     return
         if self.sink_type == "h2-grpc-replay" and tls:
-            info = self._respond_h2_grpc_replay(conn)
+            try:
+                info = self._respond_h2_grpc_replay(conn)
+            except Exception as exc:
+                info = {"op": "h2-grpc-replay", "proto": "h2",
+                        "note": f"handler error: {exc.__class__.__name__}"}
             self._close(conn)
             info["tls"] = True
             if self.on_interaction:
@@ -359,11 +363,20 @@ class BuiltinSink:
         sent_tuning_settings = False
         idle_deadline = time.monotonic() + self._grpc_idle_timeout_s
         conn.settimeout(0.5)
+        peer_gone = False
 
         def send(payload: bytes) -> None:
-            if not payload:
+            # A send failure must not propagate out of the handler (which would
+            # skip _close and on_interaction, losing the gRPC record); mark the
+            # peer gone so the loop stops and the partial record is still returned.
+            nonlocal peer_gone
+            if not payload or peer_gone:
                 return
-            conn.sendall(payload)
+            try:
+                conn.sendall(payload)
+            except (OSError, ssl.SSLError):
+                peer_gone = True
+                return
             info["bytes_out"] += len(payload)
 
         def send_window_update(stream_id: int, amount: int) -> None:
@@ -422,6 +435,9 @@ class BuiltinSink:
             send_data(stream_id, payload)
 
         while not self._stop.is_set():
+            if peer_gone:
+                info["note"] = "peer closed during response"
+                break
             if time.monotonic() > idle_deadline:
                 info["note"] = "idle timeout"
                 break
