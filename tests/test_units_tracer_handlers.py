@@ -351,6 +351,45 @@ def test_l2_gate_egress_ignores_non_egress_syscall():
     assert proc.regvals["rax"] == 1
 
 
+def test_l2_gate_blocks_io_uring_setup_under_restricting_posture():
+    # io_uring_setup (nr 425) must be denied inside an L2 window too, else the
+    # specimen creates a ring and egresses via io_uring_enter after the window.
+    tracer, events = _tracer(network={"posture": "deny", "allow": []})
+    proc = FakeProcess(regvals={"rax": 425})
+
+    tracer._l2_gate_egress(proc)
+
+    assert events[-1].data == {"name": "io_uring_setup", "phase": "enter",
+                               "blocked": True, "via": "l2-singlestep"}
+    assert proc.regvals["rax"] == (1 << 64) - 1
+
+
+def test_l2_gate_leaves_io_uring_setup_under_allow_posture():
+    tracer, events = _tracer(network={"posture": "allow", "allow": []})
+    proc = FakeProcess(regvals={"rax": 425})
+
+    tracer._l2_gate_egress(proc)
+
+    assert events == []
+    assert proc.regvals["rax"] == 425
+
+
+def test_l2_gate_sendmmsg_inspects_beyond_the_first_64_messages():
+    # a blocked destination in the 65th batched message must still fail the syscall
+    # closed (L2 cap must match the L1/kernel limit, not stop at 64).
+    tracer, _ = _tracer(network={"posture": "deny", "allow": []})
+    sockaddr = _sockaddr_in("203.0.113.99", 443)
+    hdr64 = 0x5000 + 64 * 64   # mmsghdr stride is 64; the 65th entry
+    proc = FakeProcess(
+        reads={hdr64: _msghdr(0x9000, len(sockaddr)), 0x9000: sockaddr},
+        regvals={"rax": 307, "rsi": 0x5000, "rdx": 65},   # sendmmsg, vlen=65
+    )
+
+    tracer._l2_gate_egress(proc)
+
+    assert proc.regvals["rax"] == (1 << 64) - 1
+
+
 def test_kill_on_egress_violation_requests_kill():
     tracer, _ = _tracer(kill_on=["egress_violation"])
     proc = FakeProcess(reads={0x5000: _sockaddr_in("203.0.113.10", 4444)})
