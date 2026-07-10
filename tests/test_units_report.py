@@ -266,12 +266,18 @@ def test_file_inventory_excludes_symlinks_escaping_workdir(tmp_path):
     (run / "work" / "real.txt").write_text("ok")
     (run / "work" / "loot").symlink_to(secret)  # specimen-planted symlink to a host file
 
+    # sha256 of the escaping secret, so we can prove its content was never hashed
+    import hashlib
+    secret_digest = hashlib.sha256(b"HOST SECRET").hexdigest()
+
     summary = summarize_run_dir(run)
+    rows = summary["work_files"]["files"]
     names = summary["metrics"]["work_files.names"]
 
-    assert "real.txt" in names
-    assert "loot" not in names   # must not follow the symlink / leak the host file
-    assert all("HOST SECRET" not in (row.get("sha256") or "") for row in summary["work_files"]["files"])
+    assert names == ["real.txt"]                    # only the real file; the symlink is excluded
+    assert "loot" not in names
+    # the host secret's content must not have been read/hashed into any row
+    assert all(row.get("sha256") != secret_digest for row in rows)
 
 
 def test_summary_tolerates_a_malformed_events_line(tmp_path):
