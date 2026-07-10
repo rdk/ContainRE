@@ -33,7 +33,7 @@
       }
     },
     "image": { "type": ["string", "null"], "description": "Container image used for the specimen (null for the Local backend)." },
-    "runtime": { "type": "string", "description": "Runtime backend, e.g. docker.", "default": "docker" },
+    "runtime": { "type": ["string", "null"], "description": "Runtime backend, e.g. docker; null in the transient queued state before a backend is assigned.", "default": "docker" },
     "policy_ref": { "type": "string", "description": "Relative path to the effective policy (policy.yaml).", "default": "policy.yaml" },
     "created_wall": { "type": "integer", "description": "Unix wall-clock (ns) when the run was created." },
     "started_wall": { "type": "integer", "description": "Unix wall-clock (ns) at specimen start." },
@@ -69,7 +69,7 @@
       "description": "Environment the run executed in (reproducibility + support).",
       "properties": {
         "kernel": { "type": "string" },
-        "docker": { "type": "string" },
+        "docker": { "type": ["string", "null"], "description": "Docker server version, or null when Docker is unavailable." },
         "criu": { "type": ["string", "null"], "description": "CRIU version, or null if unavailable/disabled." },
         "containre": { "type": "string", "description": "ContainRE version." }
       }
