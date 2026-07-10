@@ -59,11 +59,15 @@ def _iovec(base: int, length: int) -> bytes:
 class FakeProcess:
     pid = 4242
 
-    def __init__(self, strings=None, reads=None):
+    def __init__(self, strings=None, reads=None, regvals=None):
         self.strings = strings or {}
         self.reads = reads or {}
         self.regs = []
         self.writes = {}
+        self.regvals = dict(regvals or {})
+
+    def getreg(self, name):
+        return self.regvals.get(name, 0)
 
     def readCString(self, addr, maxlen=4096):
         return self.strings.get(addr, "")
@@ -74,6 +78,7 @@ class FakeProcess:
 
     def setreg(self, reg, value):
         self.regs.append((reg, value))
+        self.regvals[reg] = value
 
     def writeBytes(self, addr, data):
         self.writes[addr] = bytes(data)
@@ -290,6 +295,45 @@ def test_io_uring_setup_allowed_under_allow_posture():
     assert events[0].data["blocked"] is False
     assert not proc.regs
     assert tracer._pending_block == {}
+
+
+def test_l2_gate_egress_neutralizes_blocked_connect():
+    # a connect single-stepped in an L2 window must be gated: recorded, killed
+    # (if configured), and the syscall number invalidated so it never egresses.
+    tracer, events = _tracer(kill_on=["egress_violation"])
+    sockaddr = _sockaddr_in("203.0.113.77", 443)
+    proc = FakeProcess(reads={0x9000: sockaddr},
+                       regvals={"rax": 42, "rsi": 0x9000, "rdx": len(sockaddr)})  # 42 = connect
+
+    tracer._l2_gate_egress(proc)
+
+    assert events[-1].data["raddr"] == "203.0.113.77:443"
+    assert events[-1].data["decision"] == "block"
+    assert events[-1].data["via"] == "l2-singlestep"
+    assert proc.regvals["rax"] == (1 << 64) - 1   # invalid syscall nr -> kernel skips it
+    assert tracer._kill_requested
+
+
+def test_l2_gate_egress_leaves_allowlisted_connect_intact():
+    tracer, events = _tracer(network={"posture": "deny", "allow": ["203.0.113.88:443"]})
+    sockaddr = _sockaddr_in("203.0.113.88", 443)
+    proc = FakeProcess(reads={0x9000: sockaddr},
+                       regvals={"rax": 42, "rsi": 0x9000, "rdx": len(sockaddr)})
+
+    tracer._l2_gate_egress(proc)
+
+    assert events[-1].data["decision"] == "allow"
+    assert proc.regvals["rax"] == 42   # allowed egress is not neutralized
+
+
+def test_l2_gate_egress_ignores_non_egress_syscall():
+    tracer, events = _tracer()
+    proc = FakeProcess(regvals={"rax": 1})  # write(2) is nr 1, not an egress syscall
+
+    tracer._l2_gate_egress(proc)
+
+    assert events == []
+    assert proc.regvals["rax"] == 1
 
 
 def test_kill_on_egress_violation_requests_kill():
