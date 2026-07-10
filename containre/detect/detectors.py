@@ -149,11 +149,15 @@ class InjectionDetector(_Base):
         if event.get("kind") != "mem":
             return []
         d = event["data"]
+        op = d.get("op")
         perms = d.get("region", {}).get("perms", "")
-        # mmap(PROT_EXEC) emits op='map' and mprotect emits op='protect'; the
-        # allocate-RWX-directly-via-mmap pattern (common shellcode/JIT loader) must
-        # count too, not just mprotect.
-        if "x" not in perms or d.get("op") not in ("map", "protect"):
+        if "x" not in perms or op not in ("map", "protect"):
+            return []
+        # mprotect that adds execute is the classic unpack/JIT/injection tell. For
+        # mmap, only a directly-RWX (writable+executable) mapping is suspicious -
+        # a plain r-x mmap is the normal dynamic loader mapping code, which would
+        # false-positive on every dynamic binary.
+        if op == "map" and "w" not in perms:
             return []
         self._count += 1
         if self._count != 1:
