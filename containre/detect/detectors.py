@@ -27,26 +27,32 @@ class DecoyDetector(_Base):
     """A specimen touching a planted canary file is high-signal (ransomware/stealer)."""
     name = "decoy"
 
+    _TAMPER_OPS = ("write", "unlink", "rename", "chmod")
+    _ACCESS_OPS = ("open", "read")
+
     def __init__(self) -> None:
-        self._seen: set[str] = set()
+        self._seen: set[tuple[str, bool]] = set()
 
     def feed(self, event: dict) -> list[dict]:
         if event.get("kind") != "file":
             return []
         d = event["data"]
-        # Only tampering with a decoy is alarming; a bare open is left as a plain
-        # file event (visible, but not a detection).
-        if not d.get("decoy") or d.get("op") not in ("write", "unlink", "rename", "chmod"):
+        op = d.get("op")
+        # Any decoy access is high-signal (SPEC §8/§13): reading a canary is a
+        # stealer tell (high), tampering with it is a ransomware tell (critical).
+        if not d.get("decoy") or op not in self._TAMPER_OPS + self._ACCESS_OPS:
             return []
+        tampering = op in self._TAMPER_OPS
         path = d.get("path", "")
-        if path in self._seen:
+        key = (path, tampering)
+        if key in self._seen:
             return []
-        self._seen.add(path)
+        self._seen.add(key)
         return [{
             "detector": "heuristic",
             "id": "decoy-access",
-            "severity": "critical",
-            "title": f"Decoy file {d.get('op')}: {path}",
+            "severity": "critical" if tampering else "high",
+            "title": f"Decoy file {op}: {path}",
             "description": "Specimen accessed a planted canary file - strong ransomware/stealer signal.",
             "refs": _refs(seq=event["seq"], artifact_id=d.get("artifact_id")),
             "iocs": [{"type": "path", "value": path}],
