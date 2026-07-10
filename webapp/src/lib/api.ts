@@ -65,6 +65,9 @@ export function stream(
         if (TERMINAL.includes(msg.status) && !msg.active) done = true;
         onStatus(msg.status, msg.active);
       } else if (msg.type === 'error') {
+        // The backend sends an error frame then closes (no such run / bad since);
+        // treat it as terminal so onclose does not reconnect in a tight loop.
+        done = true;
         onError?.(msg.message ?? 'stream error');
       }
     };
