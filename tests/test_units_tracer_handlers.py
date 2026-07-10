@@ -223,6 +223,22 @@ def test_handle_net_sendmmsg_blocks_whole_batch_if_any_message_blocked():
     assert proc.regs, "one blocked message must fail the whole batched syscall closed"
 
 
+def test_resolve_allow_expands_hostname_and_passes_through_literals(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(socket.AF_INET, 0, 6, "", ("93.184.216.34", 0))])
+    resolved = PtraceTracer._resolve_allow(["example.com:80", "1.2.3.4:443"])
+    assert "93.184.216.34:80" in resolved   # hostname resolved to its numeric target
+    assert "example.com:80" in resolved     # original entry retained
+    assert "1.2.3.4:443" in resolved        # IP literal passed through, not re-resolved
+
+
+def test_hostname_allow_permits_the_resolved_ip(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(socket.AF_INET, 0, 6, "", ("93.184.216.34", 0))])
+    tracer, _ = _tracer(network={"posture": "deny", "allow": ["example.com:80"]})
+    assert tracer._net_decision(sc.AF_INET, "93.184.216.34", "93.184.216.34:80") == "allow"
+
+
 def test_is_multithreaded_fails_closed_on_missing_task_dir():
     tracer, _ = _tracer()
     assert tracer._is_multithreaded(999999999) is True

@@ -7,7 +7,9 @@ LocalRuntime subprocess, or the in-container probe-agent under Docker).
 """
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket as _socket
 import sys
 import threading
 import traceback
@@ -65,7 +67,7 @@ class PtraceTracer(L2Engine):
 
         net = policy.get("network", {})
         self.net_posture: str = net.get("posture", "simulate")
-        self.net_allow: set[str] = set(net.get("allow", []))
+        self.net_allow: set[str] = self._resolve_allow(net.get("allow", []))
         trace = policy.get("trace", {})
         self.l1: set[str] = set(trace.get("l1", []))
         self.snapshot_on: set[str] = set(trace.get("snapshot_on", []))
@@ -205,6 +207,47 @@ class PtraceTracer(L2Engine):
             return False
         ap = self._resolve(path)
         return ap in self.decoys or os.path.basename(ap) in {os.path.basename(d) for d in self.decoys}
+
+    @staticmethod
+    def _resolve_allow(allow) -> set[str]:
+        """Expand hostname allowlist entries ('example.com:80') to the 'ip:port'
+        forms the specimen actually connects to, so allow-by-hostname (advertised
+        by the policy schema/docs) works. IP-literal entries pass through
+        unchanged; resolution runs in the specimen's own network context (tracer
+        process) and a failure leaves the entry ineffective — fail closed for that
+        host — rather than raising. Resolved forms match parse_sockaddr's target
+        formatting (bare 'ip:port', with IPv4-mapped IPv6 collapsed to IPv4)."""
+        out: set[str] = set()
+        for entry in allow:
+            entry = str(entry)
+            out.add(entry)
+            host, sep, port = entry.rpartition(":")
+            if not sep or not host or not port.isdigit():
+                continue
+            literal = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+            try:
+                ipaddress.ip_address(literal)
+                continue  # already a numeric IP literal
+            except ValueError:
+                pass
+            try:
+                infos = _socket.getaddrinfo(literal, None, proto=_socket.IPPROTO_TCP)
+            except OSError:
+                continue
+            for info in infos:
+                ip = info[4][0]
+                try:
+                    addr = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                mapped = getattr(addr, "ipv4_mapped", None) if addr.version == 6 else None
+                if mapped is not None:
+                    out.add(f"{mapped}:{port}")
+                elif addr.version == 6:
+                    out.add(f"[{ip}]:{port}")
+                else:
+                    out.add(f"{ip}:{port}")
+        return out
 
     def _net_decision(self, family: int, ip: str | None, target: str | None) -> str:
         if family not in (sc.AF_INET, sc.AF_INET6):
