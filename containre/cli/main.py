@@ -164,9 +164,18 @@ def show(
         raise typer.Exit(1)
     meta = json.loads((run_dir / "meta.json").read_text())
     typer.echo(json.dumps(meta, indent=2))
-    all_events = [json.loads(x) for x in (run_dir / "events.jsonl").read_text().splitlines() if x.strip()]
     if events:
-        shown = [e for e in all_events if not kind or e["kind"] == kind][:limit]
+        events_path = run_dir / "events.jsonl"
+        all_events = []
+        if events_path.exists():
+            for line in events_path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:  # tolerate a torn final line / externally-produced run dir
+                    all_events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        shown = [e for e in all_events if not kind or e.get("kind") == kind][:limit]
         _echo(f"\n-- events ({len(shown)} shown){' kind=' + kind if kind else ''} --")
         for e in shown:
             _echo(f"  #{e['seq']:>5} {e['kind']:<9} {json.dumps(e['data'])[:140]}")
