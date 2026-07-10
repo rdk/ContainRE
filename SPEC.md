@@ -308,7 +308,9 @@ appears in `GET /api/runs` and per-run WebSocket streams.
 
 Runs on raw facts (pluggable `Detector` interface):
 - **YARA** over memory snapshots and dropped files.
-- **IOC extraction:** domains, IPs, URLs, mutexes, file paths, crypto constants.
+- **IOC extraction:** domains, IPs, URLs, and file paths derived from the
+  structured event stream (egress endpoints, HTTP requests, decoy/sensitive-file
+  access). Byte-level scraping for crypto constants and mutexes is *Later*.
 - **Heuristics:** anti-debug/anti-ptrace, code injection (`ptrace`/`process_vm_writev`
   /`mprotect +x`), persistence, self-deletion, decoy access.
 - *Optional:* map findings to **MITRE ATT&CK** technique tags.
