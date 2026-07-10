@@ -53,7 +53,11 @@ DEFAULTS: dict = {
         "docker_user": None,
     },
     "report": {"assertions": []},
-    "kill_on": ["egress_violation", "oom", "timeout"],
+    # Default to safety limits only. The tracer-observable triggers
+    # (egress_violation, decoy_write) abort the recording on the first blocked
+    # egress / decoy touch, so they are opt-in - a flight recorder blocks egress
+    # by default and keeps observing. timeout is always enforced regardless.
+    "kill_on": ["oom", "timeout"],
 }
 
 
