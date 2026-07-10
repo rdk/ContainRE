@@ -250,6 +250,11 @@ trace:
   l2: { mode: off }        # off | singlestep | unicorn ; window: {addr|time|until_io}
 detect: { yara: true, iocs: true, heuristics: true, attack_tags: false }
 kill_on: [egress_violation, oom, timeout]   # optional extras: decoy_write, pids_exceeded, manual
+runtime:                     # backend fixups; setup/teardown run a shell before/after the specimen
+  setup_commands: []         # shell commands run in the run context (host under LocalRuntime!) - see note
+  teardown_commands: []
+  command_shell: /bin/sh
+  command_timeout_s: 30
 ```
 
 `kill_on` triggers that the tracer observes — `egress_violation` (a blocked
@@ -257,6 +262,13 @@ egress) and `decoy_write` (decoy tampering) — terminate the run when listed.
 `timeout` (wallclock) and the event cap are always-on safety limits regardless
 of `kill_on`. `oom`/`pids_exceeded` are enforced by the container's cgroup
 limits.
+
+**`runtime.setup_commands`/`teardown_commands` execute an arbitrary shell**
+before/after the specimen — inside the container under DockerRuntime, but **on
+the host** under the (default) LocalRuntime. Because `POST /api/runs` accepts a
+full policy from any local client, this is effectively host command execution
+via the (localhost, unauthenticated) control-plane API; keep the API local-only
+and treat policies as trusted operator input until auth lands (§15).
 
 The CLI and webapp can supply launch-time overrides; the effective policy is
 persisted to the run dir for reproducibility.
