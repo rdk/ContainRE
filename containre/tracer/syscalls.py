@@ -26,11 +26,13 @@ AT_FDCWD = -100
 # Syscalls that touch the network (subject to the network policy).
 NET_SYSCALLS = {
     "socket", "connect", "bind", "listen", "accept", "accept4",
-    "sendto", "sendmsg", "recvfrom", "recvmsg", "getpeername",
-    "getsockopt",
+    "sendto", "sendmsg", "sendmmsg", "recvfrom", "recvmsg", "recvmmsg",
+    "getpeername", "getsockopt",
 }
-# Egress-initiating syscalls we may block.
-NET_EGRESS_SYSCALLS = {"connect", "sendto", "sendmsg"}
+# Egress-initiating syscalls we may block. sendmmsg batches several messages,
+# each with its own destination sockaddr, so it is a drop-in for sendmsg and must
+# be gated too (recvmmsg is receive-only and never egresses).
+NET_EGRESS_SYSCALLS = {"connect", "sendto", "sendmsg", "sendmmsg"}
 
 FILE_OPEN_SYSCALLS = {"open", "openat", "openat2", "creat"}
 FILE_SYSCALLS = FILE_OPEN_SYSCALLS | {

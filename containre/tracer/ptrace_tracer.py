@@ -151,6 +151,13 @@ class PtraceTracer(L2Engine):
             return (-1, None, None)
         return self._read_addr(process, name_ptr, name_len)
 
+    # struct mmsghdr on x86-64 = struct msghdr (56 bytes) + unsigned msg_len (4)
+    # + 4 padding => a 64-byte stride between successive batched messages.
+    _MMSGHDR_STRIDE = 64
+
+    def _read_mmsghdr_addr(self, process, vec_ptr: int, index: int):
+        return self._read_msghdr_addr(process, vec_ptr + index * self._MMSGHDR_STRIDE)
+
     def _read_iovec_data(self, process, iov_ptr: int, iov_len: int, nbytes: int) -> bytes:
         if not iov_ptr or not iov_len or nbytes <= 0:
             return b""
@@ -231,6 +238,8 @@ class PtraceTracer(L2Engine):
         name = syscall.name
         if name in ("connect", "sendto", "sendmsg"):
             self._handle_net_egress(process, syscall)
+        elif name == "sendmmsg":
+            self._handle_net_egress_mmsg(process, syscall)
         elif name in ("execve", "execveat"):
             self._handle_execve(process, syscall)
 
@@ -343,6 +352,33 @@ class PtraceTracer(L2Engine):
                     "redirected_to": redirected,
                 }
         if decision in ("block", "simulated") and not redirected:
+            self._block_at_enter(process, sc.ECONNREFUSED)
+
+    def _handle_net_egress_mmsg(self, process, syscall) -> None:
+        """sendmmsg(fd, msgvec, vlen, flags): each batched message carries its own
+        destination sockaddr. A single syscall cannot be partially blocked, so if
+        ANY message targets a blocked/simulated INET destination we fail closed and
+        drop the whole call with ECONNREFUSED (matching the sendmsg path, which also
+        does not redirect to the sink)."""
+        vec_ptr = syscall.arguments[1].value
+        vlen = syscall.arguments[2].value
+        if not vec_ptr or not vlen:
+            return
+        blocked = False
+        for i in range(min(int(vlen), 1024)):
+            family, ip, target = self._read_mmsghdr_addr(process, vec_ptr, i)
+            if family not in (sc.AF_INET, sc.AF_INET6):
+                continue
+            decision = self._net_decision(family, ip, target)
+            self.emit(Event(Kind.NET, {
+                "op": "send",
+                "proto": sc.proto_name(family),
+                "raddr": target,
+                "decision": decision,
+            }, pid=process.pid))
+            if decision in ("block", "simulated"):
+                blocked = True
+        if blocked:
             self._block_at_enter(process, sc.ECONNREFUSED)
 
     def _handle_connect_result(self, process, syscall, result) -> None:
