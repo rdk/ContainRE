@@ -35,6 +35,20 @@ def test_strings_no_false_truncation_at_exact_cap(tmp_path):
     assert any("truncated" in w for w in warns2)       # genuinely truncated -> warn
 
 
+def test_large_file_skips_tool_analysis(tmp_path, monkeypatch):
+    import containre.static_analysis as sa
+    monkeypatch.setattr(sa, "DEFAULT_MAX_TOOL_BYTES", 100)
+    d = tmp_path / "bin"
+    d.mkdir()
+    (d / "big.elf").write_bytes(b"\x7fELF" + b"\x00" * 500)  # ELF magic, > the 100B cap
+
+    data = analyze_target(d)
+
+    assert data["summary"]["files_total"] == 1
+    assert data["summary"]["symbols"] == 0   # heavy tools not run
+    assert any("skipped tool analysis" in w for w in data["warnings"])
+
+
 def test_symbol_matches_is_word_bounded_not_substring():
     assert _symbol_matches("connect", "connect")               # exact
     assert _symbol_matches("connect@plt", "connect")           # normalized exact

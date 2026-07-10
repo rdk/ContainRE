@@ -21,6 +21,10 @@ from .control.elf import elf_facts
 DEFAULT_MAX_FILES = 256
 DEFAULT_MAX_STRINGS_PER_FILE = 2000
 DEFAULT_MAX_SOURCE_REFS = 300
+# objdump -dC (and friends) buffer their entire stdout in memory; disassembly can
+# be 10-20x the input, so a large hostile binary could OOM the (host-side) harness.
+# Skip the tool-based analysis above this size, keeping just the basic file facts.
+DEFAULT_MAX_TOOL_BYTES = 64 * 1024 * 1024
 TEXT_SUFFIXES = {
     ".c",
     ".cc",
@@ -340,13 +344,22 @@ def analyze_target(
 
     for path in files:
         rel_file = _rel(path, root)
+        size = path.stat().st_size
         row = {
             "path": rel_file,
             "absolute_path": str(path),
-            "size": path.stat().st_size,
+            "size": size,
             "sha256": _sha256(path),
             "elf": elf_facts(path),
         }
+        if size > DEFAULT_MAX_TOOL_BYTES:
+            # Too large to disassemble without risking OOM; record facts only.
+            warnings.append(
+                f"{rel_file} skipped tool analysis: {size} bytes exceeds "
+                f"{DEFAULT_MAX_TOOL_BYTES}")
+            row.update({"symbols": 0, "functions": 0, "call_edges": 0, "strings": 0})
+            file_rows.append(row)
+            continue
         sym_rows, sym_warnings = _readelf_symbols(path, rel_file)
         reloc_rows, reloc_warnings = _readelf_relocations(path, rel_file)
         func_rows, edge_rows, edge_warnings = _objdump_calls(path, rel_file)
