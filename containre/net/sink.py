@@ -9,6 +9,7 @@ InetSimSink adapter can implement the same NetSink interface later.
 """
 from __future__ import annotations
 
+import errno
 import socket
 import ssl
 import threading
@@ -119,8 +120,13 @@ class BuiltinSink:
                 conn, _ = srv.accept()
             except socket.timeout:
                 continue
-            except OSError:
-                break
+            except OSError as exc:
+                # Only a closed listener (stop) is fatal; transient errors like
+                # EMFILE/ENFILE (fd exhaustion) or ECONNABORTED must not
+                # permanently disable the sink for the rest of the run.
+                if self._stop.is_set() or getattr(exc, "errno", None) == errno.EBADF:
+                    break
+                continue
             h = threading.Thread(target=self._handle, args=(conn,), daemon=True)
             # Start the handler BEFORE registering it: if start() fails (e.g. the
             # container hit its --pids-limit), close the accepted conn and keep
