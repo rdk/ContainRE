@@ -17,6 +17,16 @@ from . import unicorn_region
 
 _MASK = (1 << 64) - 1
 
+# python-ptrace's singleStep() cannot inject a pending signal (it restarts with
+# data=0). Fall back to the raw binding to single-step WITH a signal, mirroring
+# how cont(signum)/syscall(signum) deliver one. Guarded so a binding without it
+# degrades to a plain single-step.
+try:
+    from ptrace.binding.func import PTRACE_SINGLESTEP as _PTRACE_SINGLESTEP, ptrace as _raw_ptrace
+except Exception:  # pragma: no cover - platform/binding dependent
+    _PTRACE_SINGLESTEP = None
+    _raw_ptrace = None
+
 
 class L2Engine:
     def _safe_getreg(self, process, name: str) -> int:
@@ -83,6 +93,13 @@ class L2Engine:
             except Exception:
                 pass
 
+    def _single_step_signal(self, process, signum: int) -> None:
+        """Single-step, delivering `signum` if non-zero (plain single-step for 0)."""
+        if signum and _raw_ptrace is not None and _PTRACE_SINGLESTEP is not None:
+            _raw_ptrace(_PTRACE_SINGLESTEP, process.pid, 0, signum)
+        else:
+            process.singleStep()
+
     def _l2_gate_egress_at_rip(self, process) -> None:
         """Decode the instruction at rip and gate it if it is a `syscall` (used by
         _seek_to, which single-steps without decoding each instruction)."""
@@ -110,6 +127,7 @@ class L2Engine:
         addr_end = int(addr_end, 16) if isinstance(addr_end, str) else addr_end
 
         outcome = "closed"
+        pending_signal = 0
         steps = 0
         while steps < max_insns and not self._killed.is_set():
             try:
@@ -150,6 +168,7 @@ class L2Engine:
                 self.emit(Event(Kind.SIGNAL, {"signo": event.signum,
                                               "name": event.name or str(event.signum)},
                                 pid=process.pid))
+                pending_signal = event.signum   # re-inject on window close, don't drop it
                 outcome = "signal"
                 break
             if not isinstance(event, ProcessSignal):
@@ -181,7 +200,7 @@ class L2Engine:
         if outcome != "exited":
             try:
                 process.syscall_state.clear()
-                process.syscall()
+                process.syscall(pending_signal)   # 0 = no signal; else re-inject it
             except Exception:
                 pass
         return outcome
@@ -189,6 +208,7 @@ class L2Engine:
     def _seek_to(self, process, target: int, cap: int = 500000) -> str:
         """Single-step the live process until rip == target. Returns
         'reached' | 'exited' | 'missed'."""
+        pending_signal = 0
         for _ in range(cap):
             if self._killed.is_set():
                 return "missed"
@@ -198,13 +218,20 @@ class L2Engine:
                 # Gate egress syscalls encountered while seeking, same as the
                 # single-step window, so the seek phase can't leak the network.
                 self._l2_gate_egress_at_rip(process)
-                process.singleStep()
+                self._single_step_signal(process, pending_signal)  # deliver any pending signal
+                pending_signal = 0
                 event = self.debugger.waitProcessEvent(pid=process.pid)
             except Exception:
                 return "missed"
             if isinstance(event, ProcessExit):
                 self._on_process_exit(event)
                 return "exited"
+            if isinstance(event, ProcessSignal) and event.signum not in (SIGTRAP, SIGTRAP | 0x80):
+                # Record and re-inject on the next step instead of swallowing it.
+                self.emit(Event(Kind.SIGNAL, {"signo": event.signum,
+                                              "name": event.name or str(event.signum)},
+                                pid=process.pid))
+                pending_signal = event.signum
         return "missed"
 
     def _unicorn_region(self, process) -> None:
