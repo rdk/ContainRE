@@ -65,14 +65,29 @@ def test_events_skips_malformed_lines(tmp_path):
         '{"seq": 0, "kind": "proc", "data": {}}\n'
         'this is not json\n'                       # torn/garbage line
         '{"no_seq_field": true}\n'                 # valid json but missing seq
+        '{"seq": "abc", "kind": "net", "data": {}}\n'  # valid json, non-numeric seq
+        '{"seq": null, "kind": "net", "data": {}}\n'   # valid json, null seq
         '{"seq": 2, "kind": "net", "data": {}}\n'
     )
     manager = RunManager(runs_root=tmp_path, max_concurrent=1)
 
-    res = manager.events("run")
+    res = manager.events("run")   # must not raise on the non-numeric/null seq lines
 
     assert [e["seq"] for e in res["events"]] == [0, 2]   # bad lines skipped, good ones kept
     assert res["next_seq"] == 3
+
+
+def test_snapshots_tolerate_mem_event_without_data_key(tmp_path):
+    _write_meta(tmp_path, "run")
+    (tmp_path / "run" / "events.jsonl").write_text(
+        '{"seq": 0, "kind": "mem"}\n'                                      # forged: no data key
+        '{"seq": 1, "kind": "mem", "data": {"op": "snapshot", "snapshot_id": "snap-a"}}\n'
+    )
+    manager = RunManager(runs_root=tmp_path, max_concurrent=1)
+
+    snaps = manager.snapshots("run")   # must not raise on the data-less mem event
+
+    assert [e["data"]["snapshot_id"] for e in snaps] == ["snap-a"]
 
 
 def test_checkpoint_rejects_unsafe_name_without_writing_outside_run(tmp_path):
