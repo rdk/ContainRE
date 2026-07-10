@@ -44,13 +44,74 @@ class RunStore:
         self._db = sqlite3.connect(self.dir / "index.sqlite", check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(_SCHEMA_SQL)
-        row = self._db.execute("SELECT COALESCE(MAX(seq), -1) FROM events").fetchone()
-        self._seq = int(row[0]) + 1
+        # events.jsonl is the system of record and is flushed per line, but the
+        # index is committed only every 64 events, so a hard crash can leave the
+        # index behind. Replay any JSONL records past the index's max seq so the
+        # index (and the seq counter) stay consistent with the log.
+        self._seq = self._reconcile_index_from_jsonl() + 1
         self._uncommitted = 0
         self.counts: dict[str, int] = {
             "events": 0, "snapshots": 0, "checkpoints": 0,
             "detections": 0, "artifacts": 0, "net_flows": 0,
         }
+
+    def _index_max_seq(self) -> int:
+        row = self._db.execute("SELECT COALESCE(MAX(seq), -1) FROM events").fetchone()
+        return int(row[0])
+
+    def _jsonl_last_seq(self) -> int:
+        """Max seq in events.jsonl, read cheaply from the file tail (seqs are
+        monotonic, so the last complete line has the max). -1 if none."""
+        try:
+            with open(self.events_path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                if not size:
+                    return -1
+                fh.seek(max(0, size - 65536))
+                tail = fh.read().splitlines()
+        except OSError:
+            return -1
+        for line in reversed(tail):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return int(json.loads(line)["seq"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+        return -1
+
+    def _reconcile_index_from_jsonl(self) -> int:
+        """Return the max seq, healing the index from events.jsonl if it lags."""
+        index_max = self._index_max_seq()
+        if self._jsonl_last_seq() <= index_max:
+            return index_max   # index already covers the log; nothing to replay
+        try:
+            with open(self.events_path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        seq = int(rec["seq"])
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                        continue
+                    if seq <= index_max:
+                        continue
+                    data = rec.get("data", {}) or {}
+                    op = data.get("op") or data.get("name")
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO events(seq, ts_mono, pid, tid, kind, op, summary, json) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (seq, rec.get("ts_mono"), rec.get("pid"), rec.get("tid"),
+                         rec.get("kind"), op, None, json.dumps(rec, separators=(",", ":"))),
+                    )
+        except OSError:
+            return self._index_max_seq()
+        self._db.commit()
+        return self._index_max_seq()
 
     # -- events -------------------------------------------------------------
     def write_event(self, event: Event) -> int:

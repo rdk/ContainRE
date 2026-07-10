@@ -237,6 +237,26 @@ def test_store_query_and_snapshot(tmp_path):
     assert (tmp_path / "snapshots" / f"{sid}.bin").read_bytes() == b"blobdata"
 
 
+def test_index_self_heals_from_jsonl_on_reopen(tmp_path):
+    d = tmp_path / "run"
+    with RunStore(d) as st:
+        for _ in range(10):
+            st.write_event(Event(Kind.PROC, {"op": "noop"}))
+    # simulate a crash: 5 more events reached the line-buffered JSONL but the
+    # SQLite commit was lost.
+    with open(d / "events.jsonl", "a") as fh:
+        for seq in range(10, 15):
+            fh.write(json.dumps({"schema_version": 1, "seq": seq, "ts_mono": seq,
+                                 "kind": "proc", "data": {"op": "noop"}}) + "\n")
+
+    st2 = RunStore(d)   # reopen -> reconcile the index from the log
+    try:
+        assert len(st2.query(limit=100)) == 15   # index healed to match events.jsonl
+        assert st2._seq == 15                     # seq counter continues, no reuse
+    finally:
+        st2.close()
+
+
 # -- policy defaults / deep-merge -----------------------------------------
 def test_policy_deep_merge_preserves_untouched_defaults():
     from containre import policy as P
