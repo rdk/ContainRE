@@ -14,6 +14,14 @@ pytestmark = [pytest.mark.unit, pytest.mark.localnet]
 H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 
+def test_stop_survives_unstarted_handler_thread():
+    import threading
+    sink = BuiltinSink(on_interaction=lambda info: None)
+    # a handler registered but never started (e.g. start() hit the pids-limit)
+    sink._handlers.append(threading.Thread(target=lambda: None))
+    sink.stop()  # must not raise RuntimeError on the unstarted thread
+
+
 def h2_frame(frame_type: int, flags: int, stream_id: int, payload: bytes = b"") -> bytes:
     return (
         len(payload).to_bytes(3, "big")

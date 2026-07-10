@@ -122,9 +122,18 @@ class BuiltinSink:
             except OSError:
                 break
             h = threading.Thread(target=self._handle, args=(conn,), daemon=True)
+            # Start the handler BEFORE registering it: if start() fails (e.g. the
+            # container hit its --pids-limit), close the accepted conn and keep
+            # serving instead of leaving an unstarted thread in _handlers (which
+            # would make stop()'s join raise) and leaking the fd.
+            try:
+                h.start()
+            except RuntimeError:
+                self._close(conn)
+                continue
             with self._lock:
+                self._handlers = [t for t in self._handlers if t.is_alive()]  # prune finished
                 self._handlers.append(h)
-            h.start()
 
     def _handle(self, conn: socket.socket) -> None:
         conn.settimeout(0.5)
@@ -555,4 +564,7 @@ class BuiltinSink:
         with self._lock:
             handlers = list(self._handlers)
         for h in handlers:
-            h.join(timeout=drain_timeout)
+            try:
+                h.join(timeout=drain_timeout)
+            except RuntimeError:
+                continue  # never-started thread; nothing to join
