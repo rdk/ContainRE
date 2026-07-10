@@ -72,12 +72,14 @@ class DockerRuntime:
         network = policy.get("network", {})
         posture = network.get("posture", "simulate")
         docker_network = network.get("docker_network", "auto")
+        tracer = policy.get("trace", {}).get("tracer", "ptrace")
         if docker_network == "none":
             return ["--network", "none"]
         if docker_network == "host":
             if posture == "allow" or not network.get("allow"):
                 raise DockerError("network.docker_network=host requires a non-empty "
                                   "network.allow and posture other than allow")
+            self._require_tracer_for_networking(tracer, "network.docker_network=host")
             return ["--network", "host"]
         if docker_network not in ("auto", "bridge"):
             raise DockerError(f"invalid network.docker_network: {docker_network!r}")
@@ -85,8 +87,23 @@ class DockerRuntime:
         # the narrow destination policy". Without it, deny/simulate stay fully
         # detached at the Docker layer.
         if posture == "allow" or network.get("allow"):
+            self._require_tracer_for_networking(
+                tracer, "attaching container networking (posture=allow or a non-empty network.allow)")
             return []
         return ["--network", "none"]
+
+    @staticmethod
+    def _require_tracer_for_networking(tracer: str, what: str) -> None:
+        # With trace.tracer=none the runner runs the specimen untraced (raw
+        # subprocess), so there is NO egress enforcement. Attaching real container
+        # networking would then give the specimen unrestricted egress while the
+        # operator believes it is limited to the allowlist. Refuse the
+        # combination; untraced runs must use --network none + a loopback sink.
+        if tracer == "none":
+            raise DockerError(
+                f"{what} requires an active tracer (trace.tracer != none) to enforce "
+                "the destination policy; an untraced run would have unrestricted egress. "
+                "Use network.docker_network=none (with a loopback sink) for untraced runs.")
 
     def _extra_host_args(self, policy: dict) -> list[str]:
         args: list[str] = []
