@@ -29,6 +29,9 @@ _H2_FLAG_ACK = 0x1
 _H2_FLAG_END_STREAM = 0x1
 _H2_FLAG_END_HEADERS = 0x4
 _H2_SETTINGS_MAX_FRAME_SIZE_16K = bytes.fromhex("000500004000")
+_H2_MAX_FRAME_SIZE = 16384       # must match the advertised SETTINGS_MAX_FRAME_SIZE
+_H2_MAX_STREAMS = 512            # bound the per-connection stream/method tracking
+_H2_MAX_METHODS = 512
 _H2_SERVER_PING_PAYLOAD = bytes.fromhex("02041010090e0707")
 _HPACK_GRPC_OK_HEADERS = bytes.fromhex("885f8b1d75d0620d263d4c4d6564")
 _HPACK_GRPC_OK_TRAILERS = bytes.fromhex("40889acac8b21234da8f013040899acac8b5254207317f00")
@@ -483,6 +486,12 @@ class BuiltinSink:
                 continue
 
             length = int.from_bytes(buf[:3], "big")
+            if length > _H2_MAX_FRAME_SIZE:
+                # Enforce the frame size we advertised, so a client can't make us
+                # buffer up to a 16MB frame (memory DoS).
+                send(self._h2_frame(_H2_GOAWAY, 0, 0, b"\x00" * 8))
+                info["note"] = "frame exceeds advertised max frame size"
+                break
             frame_len = 9 + length
             while len(buf) < frame_len and not self._stop.is_set():
                 try:
@@ -528,7 +537,7 @@ class BuiltinSink:
 
             if frame_type == _H2_HEADERS:
                 classified = self._classify_grpc_method(payload)
-                if classified is not None:
+                if classified is not None and len(streams) < _H2_MAX_STREAMS:
                     method, mode = classified
                     streams[stream_id] = {
                         "method": method,
@@ -537,7 +546,8 @@ class BuiltinSink:
                         "headers_sent": False,
                         "messages": 0,
                     }
-                    methods.add(method)
+                    if len(methods) < _H2_MAX_METHODS:
+                        methods.add(method)
                     info["grpc"]["requests"] += 1
                     if flags & _H2_FLAG_END_STREAM:
                         if mode == "streaming":
@@ -547,6 +557,8 @@ class BuiltinSink:
                 continue
 
             if frame_type == _H2_DATA:
+                if stream_id not in streams and len(streams) >= _H2_MAX_STREAMS:
+                    continue  # too many tracked streams; drop without buffering
                 stream = streams.setdefault(stream_id, {
                     "method": f"stream-{stream_id}",
                     "mode": "unary",
