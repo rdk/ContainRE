@@ -178,6 +178,46 @@ def test_handle_net_sendmsg_blocks_destination_in_msghdr():
     assert tracer._pending_block == {proc.pid: sc.ECONNREFUSED}
 
 
+def test_handle_net_sendmmsg_blocks_destination_in_batch():
+    tracer, events = _tracer()
+    sockaddr = _sockaddr_in("203.0.113.21", 5354)
+    # mmsghdr stride is 64 bytes: msg_hdr (56) + msg_len (4) + pad (4).
+    proc = FakeProcess(reads={
+        0x5000: _msghdr(0x6000, len(sockaddr)),
+        0x6000: sockaddr,
+    })
+
+    tracer._handle_net_egress_mmsg(proc, _syscall("sendmmsg", 3, 0x5000, 1, 0))
+
+    assert events[0].kind == Kind.NET
+    assert events[0].data == {
+        "op": "send",
+        "proto": "tcp",
+        "raddr": "203.0.113.21:5354",
+        "decision": "block",
+    }
+    assert proc.regs, "blocked sendmmsg should rewrite the syscall register"
+    assert tracer._pending_block == {proc.pid: sc.ECONNREFUSED}
+
+
+def test_handle_net_sendmmsg_blocks_whole_batch_if_any_message_blocked():
+    tracer, events = _tracer()
+    first = _sockaddr_in("203.0.113.22", 80)
+    second = _sockaddr_in("203.0.113.23", 443)
+    proc = FakeProcess(reads={
+        0x5000: _msghdr(0x6000, len(first)),
+        0x5040: _msghdr(0x6100, len(second)),   # second mmsghdr at +64
+        0x6000: first,
+        0x6100: second,
+    })
+
+    tracer._handle_net_egress_mmsg(proc, _syscall("sendmmsg", 3, 0x5000, 2, 0))
+
+    assert [e.data["raddr"] for e in events] == ["203.0.113.22:80", "203.0.113.23:443"]
+    assert all(e.data["decision"] == "block" for e in events)
+    assert proc.regs, "one blocked message must fail the whole batched syscall closed"
+
+
 def test_capture_socket_writev_records_payload_chunks():
     tracer, events = _tracer()
     tracer.flows[(FakeProcess.pid, 4)] = {"raddr": "203.0.113.30:443", "chunks": []}
