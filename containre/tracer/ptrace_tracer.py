@@ -90,6 +90,10 @@ class PtraceTracer(L2Engine):
         self._kill_requested = False
         limits = policy.get("limits", {})
         self.wallclock_s: int = int(limits.get("wallclock_s", 120))
+        # Enforce the specimen's disk budget only when configured (real runs get
+        # the policy default of 256MB; bare unit-constructed tracers get 0 = off).
+        self.disk_mb: int = int(limits.get("disk_mb", 0))
+        self._workdir: str = os.getcwd()
         self.max_events = 500_000
 
         self.fd_paths: dict[tuple[int, int], str] = {}
@@ -767,17 +771,52 @@ class PtraceTracer(L2Engine):
         return out
 
     # -- main loop ----------------------------------------------------------
-    def _watchdog(self) -> None:
-        if self.wallclock_s <= 0:
-            return
-        if self._killed.wait(self.wallclock_s):
-            return
-        self.kill_reason = "timeout"
+    def _kill_root(self) -> None:
         if self.root_pid:
             try:
                 os.kill(self.root_pid, 9)
             except OSError:
                 pass
+
+    def _workdir_bytes(self, limit: int) -> int:
+        """Total size of files under the workdir, short-circuiting once it passes
+        `limit`. Uses lstat so symlinks count as themselves, not their targets."""
+        total = 0
+        try:
+            for root, _dirs, files in os.walk(self._workdir):
+                for f in files:
+                    try:
+                        total += os.lstat(os.path.join(root, f)).st_size
+                    except OSError:
+                        pass
+                if total > limit:
+                    return total
+        except OSError:
+            pass
+        return total
+
+    def _watchdog(self) -> None:
+        # Always-on safety limits: wallclock and, when limits.disk_mb is set, the
+        # specimen's on-disk write budget (docker --storage-opt only caps the
+        # overlay, not the /work bind mount, so poll it here). Neither is gated on
+        # kill_on - they must not be disable-able by policy.
+        import time as _time
+        limit_bytes = self.disk_mb * 1024 * 1024 if self.disk_mb > 0 else 0
+        has_wall = self.wallclock_s > 0
+        if not has_wall and not limit_bytes:
+            return
+        deadline = _time.monotonic() + self.wallclock_s if has_wall else None
+        poll = min(2.0, float(self.wallclock_s)) if has_wall else 2.0
+        poll = poll if poll > 0 else 2.0
+        while not self._killed.wait(poll):
+            if deadline is not None and _time.monotonic() >= deadline:
+                self.kill_reason = "timeout"
+                self._kill_root()
+                return
+            if limit_bytes and self._workdir_bytes(limit_bytes) > limit_bytes:
+                self.kill_reason = "disk"
+                self._kill_root()
+                return
 
     def run(self) -> int:
         argv = [self.specimen, *self.args]

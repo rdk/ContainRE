@@ -297,6 +297,21 @@ def test_io_uring_setup_allowed_under_allow_posture():
     assert tracer._pending_block == {}
 
 
+def test_disk_mb_parsed_and_workdir_bytes_short_circuits(tmp_path):
+    tracer, _ = _tracer(limits={"disk_mb": 128})
+    assert tracer.disk_mb == 128
+    (tmp_path / "a").write_bytes(b"x" * 1000)
+    (tmp_path / "b").write_bytes(b"y" * 1000)
+    tracer._workdir = str(tmp_path)
+    assert tracer._workdir_bytes(10**9) == 2000   # full sum when under the limit
+    assert tracer._workdir_bytes(500) > 500       # short-circuits once over the limit
+
+
+def test_disk_mb_off_by_default():
+    tracer, _ = _tracer()
+    assert tracer.disk_mb == 0
+
+
 def test_l2_gate_egress_neutralizes_blocked_connect():
     # a connect single-stepped in an L2 window must be gated: recorded, killed
     # (if configured), and the syscall number invalidated so it never egresses.
