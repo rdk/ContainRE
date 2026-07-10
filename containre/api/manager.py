@@ -305,8 +305,14 @@ class RunManager:
         ] if snap_dir.exists() else []
         if not matches:
             return None
-        header, body = snap.load(matches[0])
-        data, region = snap.region_slice(header, body, base)
+        try:
+            header, body = snap.load(matches[0])
+            data, region = snap.region_slice(header, body, base)
+        except Exception:
+            # A snapshot that can't be read (zstd blob on a host without
+            # zstandard, or a corrupt/truncated header) must degrade to 404, not
+            # crash the endpoint with a 500.
+            return None
         base_int = int(region["base"], 16) if region else 0
         return {
             "snapshot_id": snapshot_id,
