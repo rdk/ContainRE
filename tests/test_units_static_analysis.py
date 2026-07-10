@@ -6,9 +6,23 @@ import json
 import pytest
 
 from containre.report import evaluate_assertions, summarize_run_dir
-from containre.static_analysis import analyze_target, query_static, write_static
+from containre.static_analysis import (
+    _CALL_RE,
+    _symbol_matches,
+    analyze_target,
+    query_static,
+    write_static,
+)
 
 pytestmark = pytest.mark.unit
+
+
+def test_call_re_captures_full_demangled_target_with_nested_brackets():
+    line = ("  138e:\te8 01 02 03 04       \tcallq  1234 "
+            "<std::vector<int, std::allocator<int> >::push_back(int const&)>")
+    m = _CALL_RE.match(line)
+    assert m is not None
+    assert m.group(4) == "std::vector<int, std::allocator<int> >::push_back(int const&)"
 
 
 def test_static_analysis_extracts_symbols_and_calls(build_specimen):

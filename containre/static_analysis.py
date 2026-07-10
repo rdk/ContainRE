@@ -51,7 +51,9 @@ TEXT_SUFFIXES = {
 _FUNC_HEADER_RE = re.compile(r"^\s*([0-9a-fA-F]+)\s+<(.+)>:\s*$")
 _CALL_RE = re.compile(
     r"^\s*([0-9a-fA-F]+):\s+(?:[0-9a-fA-F]{2}\s+)+\s*call[q]?\s+"
-    r"(?:(0x)?([0-9a-fA-F]+)\s+)?(?:<([^>]+)>)?"
+    # Greedy <(.+)> (like _FUNC_HEADER_RE), so a demangled C++ target with nested
+    # angle brackets (std::vector<int>::push_back) isn't truncated at the first '>'.
+    r"(?:(0x)?([0-9a-fA-F]+)\s+)?(?:<(.+)>)?"
 )
 _STRING_RE = re.compile(r"^\s*([0-9a-fA-F]+)\s+(.*)$")
 _SAFE_QUERY_RE = re.compile(r"^[\w:~.$@<>,+\-*/()[\] ]{1,200}$")
