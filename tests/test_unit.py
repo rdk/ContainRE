@@ -8,7 +8,7 @@ import pytest
 
 from containre import policy as P
 from containre.model import Event, Kind
-from containre.runtime.docker import DockerError, DockerRuntime
+from containre.runtime.docker import DockerError, DockerRuntime, HostNetworkingWarning
 from containre.store import RunStore
 from containre.tracer import ptrace_tracer as ptrace_mod
 from containre.tracer import syscalls as sc
@@ -183,13 +183,14 @@ def test_docker_network_args_attach_bridge_for_allowlist():
 
 def test_docker_network_args_host_requires_narrow_allowlist():
     rt = DockerRuntime()
-    assert rt._network_args({
-        "network": {
-            "posture": "deny",
-            "allow": ["192.0.2.10:443"],
-            "docker_network": "host",
-        },
-    }) == ["--network", "host"]
+    with pytest.warns(HostNetworkingWarning):
+        assert rt._network_args({
+            "network": {
+                "posture": "deny",
+                "allow": ["192.0.2.10:443"],
+                "docker_network": "host",
+            },
+        }) == ["--network", "host"]
     with pytest.raises(DockerError):
         rt._network_args({"network": {"posture": "deny", "allow": [], "docker_network": "host"}})
     with pytest.raises(DockerError):

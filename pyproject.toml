@@ -51,6 +51,17 @@ target-version = "py311"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+filterwarnings = [
+    # Any warning not listed below fails the suite, so new/unexpected warnings surface.
+    "error",
+    # Our own intentional safety warnings - fired on every LocalRuntime/host-network run
+    # and asserted explicitly where it matters (test_units_orchestrator, test_units_docker).
+    "ignore::containre.runtime.local.LocalRuntimeIsolationWarning",
+    "ignore::containre.runtime.docker.HostNetworkingWarning",
+    # Third-party deprecations (Python 3.14 / dependency lag) - not fixable in our tree.
+    "ignore::DeprecationWarning:ptrace.tools",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]
 markers = [
     "unit: pure or low-level tests that do not run specimens under ptrace",
     "localnet: tests that bind or connect loopback sockets",
