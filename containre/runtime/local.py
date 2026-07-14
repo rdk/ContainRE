@@ -56,12 +56,15 @@ class LocalRuntime:
         configure_tls_plaintext(job)
         job_file = job.run_dir / "job.json"
         job_file.write_text(json.dumps(job.to_json()))
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "containre.tracer.runner", str(job_file)],
-            preexec_fn=self._preexec(job),
-            stdout=subprocess.DEVNULL,
-            stderr=open(job.run_dir / "runner.log", "wb"),
-        )
+        # Popen dup()s the fd into the child, so the parent can close its own
+        # handle as soon as the subprocess is spawned - the child keeps writing.
+        with open(job.run_dir / "runner.log", "wb") as runner_log:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "containre.tracer.runner", str(job_file)],
+                preexec_fn=self._preexec(job),
+                stdout=subprocess.DEVNULL,
+                stderr=runner_log,
+            )
         self._procs[str(job.run_dir)] = proc
         return RunHandle(run_dir=job.run_dir, runtime=self.name, pid=proc.pid)
 
