@@ -292,8 +292,8 @@ class DockerRuntime:
             "docker", "exec", *self._docker_user_args(job.policy), "-w", container_workdir, name,
             "python3", "-m", "containre.tracer.runner", f"{container_run_dir}/cjob.json",
         ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=open(run_dir / "runner.log", "wb"))
+        with open(run_dir / "runner.log", "wb") as runner_log:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=runner_log)
         self._procs[str(run_dir)] = proc
         return RunHandle(run_dir=run_dir, runtime=self.name, container=name, pid=proc.pid)
 
@@ -348,8 +348,8 @@ class DockerRuntime:
         cmd += ["-w", "/work", self.image,
                 "python3", "-m", "containre.tracer.runner", "/out/cjob.json"]
 
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=open(run_dir / "runner.log", "wb"))
+        with open(run_dir / "runner.log", "wb") as runner_log:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=runner_log)
         self._procs[str(run_dir)] = proc
         return RunHandle(run_dir=run_dir, runtime=self.name, container=name, pid=proc.pid)
 
