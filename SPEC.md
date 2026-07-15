@@ -1,4 +1,4 @@
-# ContainRE - Specification (v0.2)
+# ContainRE - Specification (v0.2.1)
 
 > **Contain** + **RE**: a sandbox, execution tracer, and flight recorder for
 > potentially dangerous Linux binaries, with an interactive web UI for live and

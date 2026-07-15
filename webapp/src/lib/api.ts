@@ -1,5 +1,10 @@
 export type Ev = { schema_version: number; seq: number; ts_mono: number; pid?: number; kind: string; data: any };
 export type Meta = Record<string, any>;
+export type VersionInfo = {
+  containre: string;
+  dependencies: Record<string, string | null>;
+  system: Record<string, string | null>;
+};
 
 async function J(url: string, opts?: RequestInit) {
   const r = await fetch(url, opts);
@@ -9,6 +14,7 @@ async function J(url: string, opts?: RequestInit) {
 
 export const api = {
   health: () => J('/api/health'),
+  version: (): Promise<VersionInfo> => J('/api/version'),
   runs: (): Promise<{ runs: Meta[] }> => J('/api/runs'),
   run: (id: string): Promise<Meta> => J(`/api/runs/${id}`),
   events: (id: string, since = 0, limit = 2000, kind?: string) =>

@@ -15,7 +15,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .. import __version__
 from .. import policy as P
+from ..versioning import version_info
 from .manager import CapacityError, RunManager
 
 _STATIC = Path(__file__).parent / "static"
@@ -77,13 +79,19 @@ def create_app(runs_root: Path | None = None, runtime_name: str | None = None,
         max_concurrent=max_concurrent
         or (int(os.environ["CONTAINRE_MAX_CONCURRENT"]) if os.environ.get("CONTAINRE_MAX_CONCURRENT") else None),
     )
-    app = FastAPI(title="ContainRE", version="0.2.0")
+    app = FastAPI(title="ContainRE", version=__version__)
     app.state.manager = manager
 
     @app.get("/api/health")
     def health() -> dict:
         return {"ok": True, "runtime": manager.runtime_name,
                 "max_concurrent": manager.max_concurrent}
+
+    @app.get("/api/version")
+    def version() -> dict:
+        # Structured containre / dependency / system versions; same data the CLI
+        # `--version` renders as text and the web-UI About page displays.
+        return version_info()
 
     @app.post("/api/runs")
     def create_run_ep(req: RunRequest) -> JSONResponse:
