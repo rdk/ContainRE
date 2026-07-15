@@ -77,7 +77,7 @@ def create_app(runs_root: Path | None = None, runtime_name: str | None = None,
         max_concurrent=max_concurrent
         or (int(os.environ["CONTAINRE_MAX_CONCURRENT"]) if os.environ.get("CONTAINRE_MAX_CONCURRENT") else None),
     )
-    app = FastAPI(title="ContainRE", version="0.1.0")
+    app = FastAPI(title="ContainRE", version="0.2.0")
     app.state.manager = manager
 
     @app.get("/api/health")

@@ -23,8 +23,6 @@ artifacts, and lets you inspect the result from the CLI, API, or web dashboard.
 It is built for authorized reverse engineering and malware analysis on machines
 you control.
 
-This is **version 0.1**.
-
 ## Highlights
 
 - **Containment first:** deny real network egress by default; use a locked-down
