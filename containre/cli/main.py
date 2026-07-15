@@ -35,6 +35,25 @@ def _echo(msg: str, **kw) -> None:
     typer.secho(msg, **kw)
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from .. import version_report
+
+        typer.echo(version_report())
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False, "--version",
+        help="Show containre, dependency, and system versions, then exit.",
+        callback=_version_callback, is_eager=True,
+    ),
+) -> None:
+    """Sandbox + tracer + flight recorder for Linux binaries."""
+
+
 @app.command()
 def run(
     target: str = typer.Argument(..., help="A policy file (.yaml/.json) or a specimen binary."),

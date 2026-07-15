@@ -146,6 +146,7 @@ Useful endpoints:
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/api/version` | containre, dependency, and system versions |
 | `POST` | `/api/runs` | start a run from a binary path or policy |
 | `GET` | `/api/runs` | list runs |
 | `GET` | `/api/runs/{id}/events?since=` | read events by sequence |
@@ -158,6 +159,16 @@ Useful endpoints:
 | `GET` | `/api/runs/{id}/detections` | list findings |
 | `GET` | `/api/runs/{id}/artifacts` | list captured files |
 | `GET` | `/api/runs/{id}/pcap` | download reconstructed pcap |
+
+## Version & environment
+
+`containre --version` prints the containre version, the versions of its direct
+dependencies, and relevant system software (Python, OpenSSL, Docker, CRIU, …) in
+a stable, machine-parsable format. The same data is served as JSON from
+`GET /api/version`, shown on the web dashboard's **About** tab, and available in
+Python via `containre.version_info()` / `containre.version_report()`. The format
+and parsing contract are documented in
+[documentation/version-report.md](documentation/version-report.md).
 
 ## Testing
 
