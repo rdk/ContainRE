@@ -126,6 +126,17 @@ def test_ensure_reuse_refuses_to_replace_busy_container(tmp_path, monkeypatch):
     assert not any(c[:3] == ["docker", "rm", "-f"] for c in calls)
 
 
+def test_wait_supervised_ready(tmp_path):
+    rt = DockerRuntime()
+    policy = {"runtime": {"ready_timeout_s": 0.4}}
+    # No marker -> raise after the timeout (an unhealthy container).
+    with pytest.raises(DockerError, match="not ready"):
+        rt._wait_supervised_ready(tmp_path, policy, poll_s=0.05)
+    # Marker present -> return immediately.
+    (tmp_path / ".containre-ready").write_text("1")
+    rt._wait_supervised_ready(tmp_path, policy, poll_s=0.05)
+
+
 def test_ensure_reuse_replaces_idle_container(tmp_path, monkeypatch):
     rt = DockerRuntime()
     name = "containre-reuse-prod"

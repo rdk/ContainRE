@@ -20,6 +20,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 import warnings
 from pathlib import Path
 
@@ -320,6 +321,23 @@ class DockerRuntime:
         labels = ["--label", f"{_REUSE_SUPERVISED_LABEL}=1"]
         return entry, env_args, labels
 
+    def _wait_supervised_ready(self, work_dir: Path, policy: dict, *, poll_s: float = 1.0) -> None:
+        """Block until the supervised container publishes /work/.containre-ready
+        (host path work_dir/.containre-ready) — i.e. the supervisor's sink +
+        setup services are up. Cold start (first exec) waits out the suite/job-
+        server startup; a warm container returns at once. Raises if it never
+        readies (an unhealthy container the caller should replace)."""
+        timeout_s = float(policy.get("runtime", {}).get("ready_timeout_s") or 600.0)
+        marker = Path(work_dir) / ".containre-ready"
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if marker.exists():
+                return
+            time.sleep(poll_s)
+        raise DockerError(
+            f"supervised reuse container not ready within {timeout_s:g}s "
+            f"({marker} absent); check the container's supervisor output")
+
     def _start_reused(self, job: Job) -> RunHandle:
         if job.policy.get("trace", {}).get("tracer", "ptrace") != "none":
             raise DockerError("runtime.docker_reuse_container requires trace.tracer=none")
@@ -348,6 +366,14 @@ class DockerRuntime:
         name = self._reuse_container_name(job.policy)
         config_hash = self._reuse_config_hash(job, specimen_parent, workdir)
         self._ensure_reuse_container(job, specimen_parent, workdir, name, config_hash)
+
+        if self._reuse_supervised(job.policy):
+            # The supervisor stands up the sink + setup services (e.g. the job
+            # server) on a fresh container — a minutes-long cold start. Wait for
+            # its readiness marker before launching the workload, or the exec
+            # would fail closed against not-yet-ready services. A warm container
+            # already has the marker, so later execs return immediately.
+            self._wait_supervised_ready(workdir, job.policy)
 
         # Mark this run as belonging to the reuse container so `reuse.list_live`
         # (the busy-guard + the external reaper) can see it. The in-container
