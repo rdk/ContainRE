@@ -25,6 +25,7 @@ from pathlib import Path
 
 from ..control.instrumentation import configure_tls_plaintext
 from ..interfaces import Job, RunHandle
+from . import reuse
 
 
 class HostNetworkingWarning(UserWarning):
@@ -33,6 +34,9 @@ class HostNetworkingWarning(UserWarning):
     only by the ptrace egress allowlist."""
 
 _IMAGE = "containre/runner:0.1"
+# Label marking a reuse container as SUPERVISED (its entrypoint hosts the sink +
+# setup_commands as singletons). Purely generic — no workload domain implied.
+_REUSE_SUPERVISED_LABEL = "containre.reuse.supervised"
 _REPO = Path(__file__).resolve().parents[2]
 _SAFE_REUSE_KEY = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SAFE_DOCKER_USER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*)?$")
@@ -73,6 +77,15 @@ class DockerRuntime:
         )
         if proc.returncode != 0:
             raise DockerError(f"docker build failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
+
+    # -- supervised reuse container (generic) ------------------------------
+    def _workload_only(self, policy: dict) -> bool:
+        return bool(policy.get("runtime", {}).get("workload_only"))
+
+    def _reuse_supervised(self, policy: dict) -> bool:
+        """A supervised reuse container hosts the sink + setup_commands as
+        singletons (via the supervisor entrypoint) instead of `sleep infinity`."""
+        return bool(policy.get("runtime", {}).get("docker_reuse_supervised"))
 
     # -- run ----------------------------------------------------------------
     def _network_args(self, policy: dict) -> list[str]:
@@ -182,6 +195,11 @@ class DockerRuntime:
         return f"containre-reuse-{self._reuse_key(policy)}"
 
     def _reuse_config_hash(self, job: Job, specimen_parent: Path, workdir: Path) -> str:
+        # Hash only CREATION-time config. Per-exec limits (wallclock_s) are
+        # applied per exec by the runner, NOT at container creation, so they must
+        # not churn a shared container's identity — this is what lets many execs
+        # with different timeouts reuse one container.
+        limits = {k: v for k, v in job.policy.get("limits", {}).items() if k != "wallclock_s"}
         payload = {
             "image": self.image,
             "network_args": self._network_args(job.policy),
@@ -191,7 +209,8 @@ class DockerRuntime:
             "runs_root": str(job.run_dir.resolve().parent),
             "workdir": str(workdir),
             "specimen_parent": str(specimen_parent),
-            "limits": job.policy.get("limits", {}),
+            "limits": limits,
+            "supervised": self._reuse_supervised(job.policy),
             "trace": job.policy.get("trace", {}).get("tracer", "ptrace"),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -216,8 +235,17 @@ class DockerRuntime:
 
     def _ensure_reuse_container(self, job: Job, specimen_parent: Path, workdir: Path,
                                 name: str, config_hash: str) -> None:
+        supervised = self._reuse_supervised(job.policy)
+        runs_root = job.run_dir.resolve().parent
         exists, running, current_hash = self._inspect_reuse_container(name)
         if exists and current_hash != config_hash:
+            # Never force-replace a reuse container that still has live execs —
+            # that would kill a busy peer. Refuse; the container is replaced once
+            # it drains (an external reaper stops it when idle).
+            if reuse.is_busy(runs_root, name):
+                raise DockerError(
+                    f"refusing to replace reuse container {name}: it has live "
+                    "exec(s) and its creation config changed. Drain it first.")
             subprocess.run(["docker", "rm", "-f", name],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             exists = running = False
@@ -230,11 +258,16 @@ class DockerRuntime:
             return
 
         limits = job.policy.get("limits", {})
-        runs_root = job.run_dir.resolve().parent
+        if supervised:
+            entry, env_args, extra_labels = self._supervised_spec(job)
+        else:
+            entry, env_args, extra_labels = ["sleep", "infinity"], [], []
+
         cmd = [
             "docker", "run", "-d", "--name", name,
             "--label", "containre.reuse=1",
             "--label", f"containre.config={config_hash}",
+            *extra_labels,
             "--cap-drop", "ALL",
             "--cap-add", "DAC_OVERRIDE",
             "--security-opt", "no-new-privileges",
@@ -245,6 +278,7 @@ class DockerRuntime:
             "--pids-limit", str(int(limits.get("pids", 128))),
             "--memory", f"{int(limits.get('mem_mb', 512))}m",
             "--cpus", str(limits.get("cpu", 1)),
+            *env_args,
             *self._read_only_mount_args(job.policy),
             "-v", f"{runs_root}:/runs",
             "-v", f"{workdir}:/work",
@@ -253,11 +287,38 @@ class DockerRuntime:
             "-v", f"{self.build_context / 'contracts'}:/opt/containre/contracts:ro",
             "-w", "/work",
             self.image,
-            "sleep", "infinity",
+            *entry,
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise DockerError(f"docker reusable container start failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
+
+    def _supervised_spec(self, job: Job) -> tuple[list[str], list[str], list[str]]:
+        """Entry command, -e env args, and labels for a supervised reuse
+        container: the supervisor entrypoint plus the sink / setup / CA control
+        vars it reads to host its singletons. The service env is the caller-
+        supplied ``runtime.supervisor_env`` (kept SEPARATE from the per-exec
+        specimen env so per-exec values don't pin the shared services). Generic:
+        ContainRE forwards these dicts without interpreting them."""
+        runtime_cfg = job.policy.get("runtime", {})
+        service_env = runtime_cfg.get("supervisor_env") or {}
+        net = job.policy.get("network", {})
+        control_env = {
+            "CONTAINRE_SINK_CONFIG": json.dumps(net.get("sink") or {}),
+            "CONTAINRE_SINK_MITM": "1" if net.get("mitm") else "0",
+            "CONTAINRE_SETUP_COMMANDS": json.dumps(runtime_cfg.get("setup_commands") or []),
+            "CONTAINRE_CA_PATH": runtime_cfg.get("ca_path") or "/work/.containre-ca.pem",
+            "CONTAINRE_READY_MARKER": "/work/.containre-ready",
+            "CONTAINRE_COMMAND_SHELL": str(runtime_cfg.get("command_shell") or "/bin/sh"),
+        }
+        if runtime_cfg.get("ready_probe"):
+            control_env["CONTAINRE_READY_PROBE"] = str(runtime_cfg["ready_probe"])
+        env_args: list[str] = []
+        for key, value in {**service_env, **control_env}.items():
+            env_args += ["-e", f"{key}={value}"]
+        entry = ["python3", "-m", "containre.runtime.supervisor"]
+        labels = ["--label", f"{_REUSE_SUPERVISED_LABEL}=1"]
+        return entry, env_args, labels
 
     def _start_reused(self, job: Job) -> RunHandle:
         if job.policy.get("trace", {}).get("tracer", "ptrace") != "none":
@@ -287,6 +348,19 @@ class DockerRuntime:
         name = self._reuse_container_name(job.policy)
         config_hash = self._reuse_config_hash(job, specimen_parent, workdir)
         self._ensure_reuse_container(job, specimen_parent, workdir, name, config_hash)
+
+        # Mark this run as belonging to the reuse container so `reuse.list_live`
+        # (the busy-guard + the external reaper) can see it. The in-container
+        # runner writes leader.pgid into the run dir; together they let ContainRE
+        # tell whether the container is still busy, and let an external
+        # orchestrator kill this one exec without touching the container.
+        reuse.mark(run_dir, name)
+        owner_pid = job.policy.get("runtime", {}).get("owner_pid")
+        if owner_pid:
+            # Opaque owner: if this host process dies, `reuse reap` reclaims the
+            # exec. ContainRE neither knows nor cares who the owner is.
+            reuse.mark_owner(run_dir, int(owner_pid),
+                             job.policy.get("runtime", {}).get("owner_token"))
 
         cmd = [
             "docker", "exec", *self._docker_user_args(job.policy), "-w", container_workdir, name,
@@ -358,18 +432,32 @@ class DockerRuntime:
         if proc is None:
             return None
         try:
-            return proc.wait(timeout=timeout)
+            rc = proc.wait(timeout=timeout)
+            # Normal completion: drop the reuse marker so the container is no
+            # longer counted busy on this run's account. The run dir itself is
+            # left in place (the caller still reads its outputs).
+            reuse.clear(handle.run_dir)
+            return rc
         except subprocess.TimeoutExpired:
             self.stop(handle)
             return None
 
+    def _is_reuse_exec(self, handle: RunHandle) -> bool:
+        return (Path(handle.run_dir) / reuse.MARKER_FILE).exists()
+
     def stop(self, handle: RunHandle) -> None:
+        # A reuse-container exec is stopped PER-EXEC: kill only this run's process
+        # group inside the shared container — never `docker kill` the container,
+        # which would take down live peers. A fresh (non-reuse) run is killed
+        # wholesale, as before.
+        if handle.container and self._is_reuse_exec(handle):
+            pgid = reuse.read_pgid(handle.run_dir)
+            if pgid is not None:
+                reuse._kill_pgid(handle.container, pgid)
+            reuse.clear(handle.run_dir)
+            return
         # `docker kill` the container - for a sandbox, reliably STOPPING the
-        # specimen is the safety-critical property. For a shared reuse container
-        # (containre-reuse-<key>) this also tears down any OTHER concurrent
-        # same-key runs and defeats the reuse optimization; that is why running
-        # multiple runs on one reuse key concurrently is discouraged (see
-        # documentation/batch-helper-services.md). Terminating only the local
+        # specimen is the safety-critical property. Terminating only the local
         # docker-exec client instead does NOT stop the in-container process, so it
         # is not an option.
         if handle.container:

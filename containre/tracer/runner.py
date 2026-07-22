@@ -117,7 +117,7 @@ def _run_runtime_commands(job: Job, session: RunSession, phase: str) -> tuple[in
     return None, None
 
 
-def _run_without_tracer(job: Job, console_path: str) -> tuple[int | None, str | None]:
+def _run_without_tracer(job: Job, console_path: str, on_start=None) -> tuple[int | None, str | None]:
     stdin_fh = open(job.stdin_path, "rb") if job.stdin_path else None
     timeout = float(job.policy.get("limits", {}).get("wallclock_s", 120))
     try:
@@ -131,6 +131,10 @@ def _run_without_tracer(job: Job, console_path: str) -> tuple[int | None, str | 
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            # start_new_session makes the child a session/pgroup leader, so its
+            # pid IS its pgid — the handle the host reconciler kills (S1/C2).
+            if on_start is not None:
+                on_start(proc.pid)
             try:
                 return proc.wait(timeout=timeout), None
             except subprocess.TimeoutExpired:
@@ -145,6 +149,27 @@ def _run_without_tracer(job: Job, console_path: str) -> tuple[int | None, str | 
             stdin_fh.close()
 
 
+def _workload_only(job: Job) -> bool:
+    return bool(job.policy.get("runtime", {}).get("workload_only"))
+
+
+def _pgid_writer(job: Job):
+    """Return a callback that records the workload's leader pgid at
+    <run_dir>/leader.pgid — the generic handle ContainRE (and any external
+    orchestrator) uses to tell whether this exec is still alive and to stop just
+    this exec's process group. The run dir is host-visible via the /runs mount."""
+    pgid_path = Path(job.run_dir) / "leader.pgid"
+
+    def _write(pgid: int) -> None:
+        try:
+            pgid_path.parent.mkdir(parents=True, exist_ok=True)
+            pgid_path.write_text(str(pgid))
+        except OSError:
+            pass  # the reaper falls back to the marker window; never crash the run
+
+    return _write
+
+
 def execute(job: Job) -> int:
     cwd = job.cwd
     if cwd and os.path.isdir(cwd):
@@ -155,11 +180,28 @@ def execute(job: Job) -> int:
     decoy_names = job.policy.get("files", {}).get("decoys", [])
     decoy_paths = [os.path.join(workdir, d) for d in decoy_names]
 
-    # Bring up the simulated-internet sink for simulate posture. In normal ptrace
-    # mode the tracer redirects connects to it; in trace.tracer=none benchmark
-    # mode policies should map the target hostname to loopback and configure the
-    # sink's original service listen_port.
-    net_sink, sink_addr = _start_sink(job, session)
+    workload_only = _workload_only(job)
+    if workload_only:
+        # Supervised reuse container: the sink + setup services are already hosted
+        # by the container's supervisor. Fail CLOSED if it is not healthy —
+        # running a workload with no services is a silent-failure trap.
+        runtime_cfg = job.policy.get("runtime", {})
+        if not Path("/work/.containre-ready").exists():
+            session.store.update_meta(status="running", started_wall=wall_ns())
+            session.finalize("killed", None, "services_unavailable")
+            return 3
+        # Trust the supervisor's fixed CA so TLS to the shared sink verifies.
+        ca_path = runtime_cfg.get("ca_path") or "/work/.containre-ca.pem"
+        if os.path.exists(ca_path):
+            job.env["SSL_CERT_FILE"] = ca_path
+            job.env["GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"] = ca_path
+        net_sink, sink_addr = None, None
+    else:
+        # Bring up the simulated-internet sink for simulate posture. In normal
+        # ptrace mode the tracer redirects connects to it; in trace.tracer=none
+        # benchmark mode policies map the target hostname to loopback and
+        # configure the sink's original service listen_port.
+        net_sink, sink_addr = _start_sink(job, session)
 
     session.store.update_meta(status="running", started_wall=wall_ns())
 
@@ -168,11 +210,16 @@ def execute(job: Job) -> int:
     flows = {}
     exit_code = None
     try:
-        setup_exit, setup_reason = _run_runtime_commands(job, session, "setup")
+        # In workload_only mode the singleton services are hosted by the
+        # supervisor, so per-exec setup/teardown are skipped entirely.
+        setup_exit, setup_reason = (None, None) if workload_only \
+            else _run_runtime_commands(job, session, "setup")
         if setup_reason:
             exit_code, kill_reason = setup_exit, setup_reason
         elif tracer_mode == "none":
-            exit_code, kill_reason = _run_without_tracer(job, str(job.run_dir / "console.log"))
+            exit_code, kill_reason = _run_without_tracer(
+                job, str(job.run_dir / "console.log"),
+                on_start=_pgid_writer(job) if workload_only else None)
         else:
             tracer = PtraceTracer(
                 specimen=job.specimen_path, args=job.args, env=job.env, policy=job.policy,
@@ -184,11 +231,12 @@ def execute(job: Job) -> int:
             kill_reason = tracer.kill_reason
             flows = tracer.flows
     finally:
-        teardown_exit, teardown_reason = _run_runtime_commands(job, session, "teardown")
-        if teardown_reason and kill_reason is None:
-            kill_reason = teardown_reason
-        if teardown_exit is not None and exit_code is None:
-            exit_code = teardown_exit
+        if not workload_only:
+            teardown_exit, teardown_reason = _run_runtime_commands(job, session, "teardown")
+            if teardown_reason and kill_reason is None:
+                kill_reason = teardown_reason
+            if teardown_exit is not None and exit_code is None:
+                exit_code = teardown_exit
         if net_sink is not None:
             net_sink.stop()
 

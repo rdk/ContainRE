@@ -519,6 +519,76 @@ def watch(
         pass
 
 
+reuse_app = typer.Typer(help="Manage supervised/reuse containers (generic lifecycle).")
+app.add_typer(reuse_app, name="reuse")
+
+
+@reuse_app.command("ls")
+def reuse_ls(
+    key: str = typer.Argument(..., help="The reuse key (container = containre-reuse-<key>)."),
+    runs_root: Path = typer.Option(None, "--runs-root"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """List the live execs in a reuse container (those whose workload process
+    group is still alive). Also the busy-check an external reaper uses."""
+    from ..runtime import reuse
+    live = reuse.list_live(runs_root or default_runs_root(), f"containre-reuse-{key}")
+    if as_json:
+        typer.echo(json.dumps(live, indent=2))
+        return
+    _echo(f"{len(live)} live exec(s) in containre-reuse-{key}")
+    for e in live:
+        _echo(f"  {e['run_id']}  pgid={e['pgid']}")
+
+
+@reuse_app.command("kill")
+def reuse_kill(
+    key: str = typer.Argument(..., help="The reuse key."),
+    run_id: str = typer.Argument(..., help="The run whose exec to stop."),
+    runs_root: Path = typer.Option(None, "--runs-root"),
+) -> None:
+    """Stop ONE exec's process group inside the reuse container (peers and the
+    container keep running). Used by an external orchestrator to reap an
+    abandoned exec — ContainRE provides the mechanism, not the abandon policy."""
+    from ..runtime import reuse
+    ok = reuse.kill(runs_root or default_runs_root(), f"containre-reuse-{key}", run_id)
+    _echo(f"kill {run_id}: {'stopped' if ok else 'no live process group found'}")
+
+
+@reuse_app.command("reap")
+def reuse_reap(
+    key: str = typer.Argument(..., help="The reuse key."),
+    runs_root: Path = typer.Option(None, "--runs-root"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Stop execs whose OWNER process has died (abandoned execs). Generic: an
+    exec is abandoned when the opaque owner pid it recorded is no longer alive.
+    A node timer runs this frequently to reclaim orphans left by a crashed
+    caller; peers and the container keep running."""
+    from ..runtime import reuse
+    killed = reuse.reap(runs_root or default_runs_root(), f"containre-reuse-{key}")
+    if as_json:
+        typer.echo(json.dumps({"reaped": killed}, indent=2))
+        return
+    _echo(f"reaped {len(killed)} abandoned exec(s): {killed}" if killed else "nothing to reap")
+
+
+@reuse_app.command("stop")
+def reuse_stop(
+    key: str = typer.Argument(..., help="The reuse key."),
+    runs_root: Path = typer.Option(None, "--runs-root"),
+    idle_minutes: float = typer.Option(0.0, "--idle-minutes",
+                                       help="Only stop if idle at least this long (keeps it warm between waves)."),
+) -> None:
+    """Stop the whole reuse container IFF it has no live execs (and has been idle
+    at least --idle-minutes). Refuses while busy. An idle-reaper calls this on a
+    timer."""
+    from ..runtime import reuse
+    stopped = reuse.stop_if_idle(runs_root or default_runs_root(),
+                                 f"containre-reuse-{key}", idle_s=idle_minutes * 60.0)
+    _echo("stopped" if stopped else "still busy or not idle long enough — not stopped")
+
+
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host"),

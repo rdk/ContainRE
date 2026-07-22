@@ -360,8 +360,55 @@
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]*)?$",
           "description": "DockerRuntime-only user passed to docker run/exec via --user, for example '1000:1000'. Null or empty means Docker's image default user.",
           "default": null
+        },
+        "docker_reuse_supervised": {
+          "type": "boolean",
+          "description": "DockerRuntime-only. When true, the reuse container runs the supervisor entrypoint (hosting the built-in sink + runtime.setup_commands as singletons, with a readiness gate) instead of a bare sleep, so workload_only execs can share it. Domain-agnostic; the hosted services are whatever network.sink + setup_commands describe.",
+          "default": false
+        },
+        "workload_only": {
+          "type": "boolean",
+          "description": "DockerRuntime-only. When true, this exec assumes the reuse container's supervisor already provides the services, so it SKIPS per-exec sink/setup/teardown and just runs the workload. It fails closed (nonzero) if the container is not ready. Requires docker_reuse_container=true and docker_reuse_supervised=true.",
+          "default": false
+        },
+        "supervisor_env": {
+          "type": "object",
+          "description": "Environment for the supervised container's services (set once at container creation), kept separate from the per-exec specimen env so per-exec values don't pin the shared services. Forwarded verbatim; ContainRE never interprets it.",
+          "additionalProperties": { "type": "string" },
+          "default": {}
+        },
+        "ca_path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Fixed in-container path where the supervisor publishes the MITM CA (mitm sinks); every workload_only exec trusts it. Also read by the runner to set SSL_CERT_FILE.",
+          "default": "/work/.containre-ca.pem"
+        },
+        "ready_probe": {
+          "type": ["string", "null"],
+          "description": "Optional shell command the supervisor must see exit 0 (in addition to the sink + setup_commands) before marking the container ready."
+        },
+        "owner_pid": {
+          "type": ["integer", "null"],
+          "description": "Opaque owner: the host process this exec belongs to. If it dies, `containre reuse reap` reclaims the exec's process group. ContainRE does not interpret it. Only meaningful for a reuse exec."
+        },
+        "owner_token": {
+          "type": ["string", "null"],
+          "description": "Start-token guarding owner_pid against PID reuse (the owner's /proc start-time). Optional."
         }
       },
+      "allOf": [
+        {
+          "$comment": "Fail-closed: workload_only requires a supervised reuse container.",
+          "if": { "properties": { "workload_only": { "const": true } }, "required": ["workload_only"] },
+          "then": {
+            "required": ["docker_reuse_container", "docker_reuse_supervised"],
+            "properties": {
+              "docker_reuse_container": { "const": true },
+              "docker_reuse_supervised": { "const": true }
+            }
+          }
+        }
+      ],
       "additionalProperties": false,
       "default": {}
     },
