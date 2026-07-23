@@ -217,8 +217,23 @@ class DockerRuntime:
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()[:24]
 
+    #: docker control commands (inspect/rm/start/run/kill) are bounded — a hung or
+    #: overloaded daemon would otherwise block a dock indefinitely BEFORE the run
+    #: reaches the grace-bounded wait(). `docker run -d` is detached (returns once
+    #: the container is created, not when the workload finishes), so this bounds
+    #: setup only, never a real dock.
+    _DOCKER_CTL_TIMEOUT_S = 120.0
+
+    def _run_ctl(self, argv: list[str], **kw) -> "subprocess.CompletedProcess[str]":
+        try:
+            return subprocess.run(argv, timeout=self._DOCKER_CTL_TIMEOUT_S, **kw)
+        except subprocess.TimeoutExpired as exc:
+            raise DockerError(
+                f"docker control command timed out after {self._DOCKER_CTL_TIMEOUT_S:g}s "
+                f"(daemon unresponsive?): {' '.join(str(a) for a in argv[:3])} …") from exc
+
     def _inspect_reuse_container(self, name: str) -> tuple[bool, bool, str | None]:
-        proc = subprocess.run(
+        proc = self._run_ctl(
             [
                 "docker", "inspect",
                 "--format", "{{.State.Running}} {{index .Config.Labels \"containre.config\"}}",
@@ -247,13 +262,21 @@ class DockerRuntime:
                 raise DockerError(
                     f"refusing to replace reuse container {name}: it has live "
                     "exec(s) and its creation config changed. Drain it first.")
-            subprocess.run(["docker", "rm", "-f", name],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._run_ctl(["docker", "rm", "-f", name],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             exists = running = False
         if exists and running:
             return
+        # About to (re)start the container. A supervised container's readiness
+        # marker lives on the host /work mount and SURVIVES docker rm -f / OOM /
+        # daemon crash (the old supervisor only clears it on a graceful SIGTERM).
+        # Drop any stale marker now so _wait_supervised_ready blocks until the NEW
+        # supervisor re-publishes it — otherwise the workload could launch against
+        # not-yet-ready services and silently produce a wrong result.
+        if self._reuse_supervised(job.policy):
+            (Path(workdir) / ".containre-ready").unlink(missing_ok=True)
         if exists:
-            proc = subprocess.run(["docker", "start", name], capture_output=True, text=True)
+            proc = self._run_ctl(["docker", "start", name], capture_output=True, text=True)
             if proc.returncode != 0:
                 raise DockerError(f"docker start {name} failed: {proc.stderr.strip() or proc.stdout.strip()}")
             return
@@ -286,7 +309,7 @@ class DockerRuntime:
             self.image,
             *entry,
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = self._run_ctl(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise DockerError(f"docker reusable container start failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
 
@@ -503,6 +526,7 @@ class DockerRuntime:
             try:
                 rc = proc.wait(timeout=timeout)
                 reuse.clear(handle.run_dir)
+                self._procs.pop(str(handle.run_dir), None)  # don't leak in a long-lived runtime
                 return rc
             except subprocess.TimeoutExpired:
                 self.stop(handle)
@@ -522,6 +546,7 @@ class DockerRuntime:
             rc = proc.poll()
             if rc is not None:                       # exec returned normally
                 reuse.clear(handle.run_dir)
+                self._procs.pop(str(handle.run_dir), None)  # don't leak in a long-lived runtime
                 return rc
             if self._run_meta(handle.run_dir).get("status") in ("finished", "killed", "error"):
                 # Runner finalized but the `docker exec` is wedged: the run's
@@ -555,8 +580,12 @@ class DockerRuntime:
         # docker-exec client instead does NOT stop the in-container process, so it
         # is not an option.
         if handle.container:
-            subprocess.run(["docker", "kill", handle.container],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                subprocess.run(["docker", "kill", handle.container],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=self._DOCKER_CTL_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                pass  # best-effort stop; a wedged daemon must not hang the caller
 
     # -- CRIU checkpoint/restore (best-effort) ------------------------------
     def _experimental(self) -> bool:

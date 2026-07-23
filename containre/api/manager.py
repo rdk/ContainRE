@@ -75,15 +75,21 @@ class RunManager:
         finally:
             with self._lock:
                 self._starting -= 1
-        threading.Thread(target=self._reap, args=(run_id, handle), daemon=True).start()
+        # Bound the reaper's wait: without a timeout, runtime.wait() gets an
+        # infinite deadline, so a run that never finishes (a wedged docker
+        # run/exec whose meta.json never goes terminal) would pin this daemon
+        # thread AND its capacity slot in _active forever → eventual CapacityError
+        # for all new runs. Grace mirrors the CLI (orchestrator.execute).
+        grace = float(job.policy.get("limits", {}).get("wallclock_s", 120)) + 30.0
+        threading.Thread(target=self._reap, args=(run_id, handle, grace), daemon=True).start()
         return {"run_id": run_id, "run_dir": str(run_dir), "status": "running"}
 
-    def _reap(self, run_id: str, handle) -> None:
+    def _reap(self, run_id: str, handle, timeout: float | None = None) -> None:
         exit_code = None
         wait_error = None
         try:
             try:
-                exit_code = self.runtime.wait(handle)
+                exit_code = self.runtime.wait(handle, timeout=timeout)
             except Exception as exc:
                 wait_error = str(exc)
             self._mark_unfinalized_run(run_id, exit_code, wait_error)
