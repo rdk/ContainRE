@@ -340,6 +340,36 @@ def test_mitm_sink_completes_handshake_for_slow_tls_client():
     assert seen[0]["grpc"]["methods"] == ["BeginStreaming"]
 
 
+def test_h2_grpc_replay_bounds_a_stalled_partial_preface():
+    # A client that completes TLS, sends a PARTIAL h2 preface, then stalls must NOT
+    # hang the handler forever (leaking a thread/fd/pid). The pre-preface read loop
+    # must fall back to the outer idle-timeout check, like the frame loops — so the
+    # handler closes the connection at idle_deadline instead of spinning.
+    ca = MitmCA()
+    sink = BuiltinSink(on_interaction=lambda i: None, mitm=True, ca=ca,
+                       sink_config={"type": "h2-grpc-replay", "idle_timeout_s": 1})
+    sink.start()
+    try:
+        cctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        cctx.load_verify_locations(cadata=ca.ca_pem().decode())
+        cctx.set_alpn_protocols(["h2"])
+        raw = socket.create_connection(("127.0.0.1", sink.port), timeout=3)
+        tls = cctx.wrap_socket(raw, server_hostname="grpc.example.test")
+        tls.sendall(b"PRI * HTTP/2")   # 12 of the 24 preface bytes, then stall
+        tls.settimeout(5)
+        t0 = time.monotonic()
+        try:
+            leftover = tls.recv(64)    # post-fix: EOF (closed) at ~idle_deadline
+        except (socket.timeout, ssl.SSLError):
+            leftover = b"__blocked__"  # pre-fix: handler spins, nothing sent/closed
+        elapsed = time.monotonic() - t0
+        tls.close()
+    finally:
+        sink.stop()
+    assert leftover == b"", f"stalled partial-preface conn not closed (got {leftover!r} after {elapsed:.1f}s)"
+    assert elapsed < 4, f"idle-timeout close took too long: {elapsed:.1f}s"
+
+
 def test_h2_grpc_replay_rejects_oversized_frame():
     # A frame whose declared length exceeds the advertised 16384 max must be
     # rejected (GOAWAY) on the length field, before buffering the body.
