@@ -477,20 +477,64 @@ class DockerRuntime:
         self._procs[str(run_dir)] = proc
         return RunHandle(run_dir=run_dir, runtime=self.name, container=name, pid=proc.pid)
 
+    #: Poll interval for the reuse-exec wait (see wait()).
+    _REUSE_WAIT_POLL_S = 0.5
+
+    def _run_meta(self, run_dir: Path) -> dict:
+        try:
+            return json.loads((Path(run_dir) / "meta.json").read_text())
+        except (OSError, json.JSONDecodeError, ValueError):
+            return {}
+
+    def _reap_proc(self, run_dir: Path, proc: "subprocess.Popen") -> None:
+        """Kill and reap a wedged host `docker exec` process so it can't linger."""
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        self._procs.pop(str(run_dir), None)
+
     def wait(self, handle: RunHandle, timeout: float | None = None) -> int | None:
         proc = self._procs.get(str(handle.run_dir))
         if proc is None:
             return None
-        try:
-            rc = proc.wait(timeout=timeout)
-            # Normal completion: drop the reuse marker so the container is no
-            # longer counted busy on this run's account. The run dir itself is
-            # left in place (the caller still reads its outputs).
-            reuse.clear(handle.run_dir)
-            return rc
-        except subprocess.TimeoutExpired:
-            self.stop(handle)
-            return None
+        if not self._is_reuse_exec(handle):
+            try:
+                rc = proc.wait(timeout=timeout)
+                reuse.clear(handle.run_dir)
+                return rc
+            except subprocess.TimeoutExpired:
+                self.stop(handle)
+                return None
+        # Reuse exec (`docker exec` into the SHARED container): under sustained
+        # concurrency a `docker exec` can fail to return even after its
+        # in-container runner has FINALIZED — the container goes idle and the
+        # run's meta.json is already terminal, yet the exec never exits. Blocking
+        # on proc.wait() would then stall THIS caller for the whole grace window
+        # (and, upstream, leave a scheduler item/chunk non-terminal so the job never
+        # finalizes). So poll the exec process AND the run's terminal meta.json,
+        # and return as soon as either says the work is done — reaping a wedged
+        # exec. A genuine in-container hang (meta never terminal) still falls
+        # through to the grace timeout below, unchanged.
+        deadline = time.monotonic() + (timeout if timeout is not None else float("inf"))
+        while time.monotonic() < deadline:
+            rc = proc.poll()
+            if rc is not None:                       # exec returned normally
+                reuse.clear(handle.run_dir)
+                return rc
+            if self._run_meta(handle.run_dir).get("status") in ("finished", "killed", "error"):
+                # Runner finalized but the `docker exec` is wedged: the run's
+                # outputs are complete. Reap the stray exec + kill this run's
+                # (already-dead) leader pgid, then report the run's own exit code.
+                exit_code = self._run_meta(handle.run_dir).get("exit_code")
+                self._reap_proc(handle.run_dir, proc)
+                self.stop(handle)
+                return exit_code
+            time.sleep(self._REUSE_WAIT_POLL_S)
+        self._reap_proc(handle.run_dir, proc)
+        self.stop(handle)
+        return None
 
     def _is_reuse_exec(self, handle: RunHandle) -> bool:
         return (Path(handle.run_dir) / reuse.MARKER_FILE).exists()

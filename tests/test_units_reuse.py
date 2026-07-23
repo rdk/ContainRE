@@ -7,12 +7,13 @@ All docker/in-container calls are monkeypatched.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from containre.interfaces import Job
+from containre.interfaces import Job, RunHandle
 from containre.runtime import docker as dockermod
 from containre.runtime import reuse
 from containre.runtime.docker import DockerError, DockerRuntime
@@ -124,6 +125,75 @@ def test_ensure_reuse_refuses_to_replace_busy_container(tmp_path, monkeypatch):
     with pytest.raises(DockerError, match="live exec"):
         rt._ensure_reuse_container(_job(tmp_path), Path("/work"), Path("/work"), name, "NEWHASH")
     assert not any(c[:3] == ["docker", "rm", "-f"] for c in calls)
+
+
+# -- reuse-exec wait(): tolerate a wedged `docker exec` ------------------------
+
+class _FakeProc:
+    """Stand-in for the `docker exec` Popen. poll_rc=None models a WEDGED exec
+    (never returns, as observed under shared-container concurrency); an int
+    models a normal exit."""
+    def __init__(self, poll_rc=None):
+        self._rc = poll_rc
+        self.killed = False
+
+    def poll(self):
+        return self._rc
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        # A wedged exec never returns -> .wait(timeout) times out, exactly as the
+        # old proc.wait()-based path would see it (so the fix is what rescues it).
+        if self._rc is None:
+            raise subprocess.TimeoutExpired(cmd="docker exec", timeout=timeout)
+        return self._rc
+
+
+def _reuse_handle(tmp_path, *, status, exit_code=None, container="c1"):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    reuse.mark(run_dir, container)  # writes MARKER_FILE -> _is_reuse_exec() True
+    if status is not None:
+        (run_dir / "meta.json").write_text(
+            json.dumps({"run_id": "r1", "status": status, "exit_code": exit_code}))
+    return RunHandle(run_dir=run_dir, runtime="docker", container=container, pid=1)
+
+
+def test_wait_reuse_exec_short_circuits_on_terminal_meta(tmp_path):
+    # A wedged `docker exec` (poll never returns) must NOT stall wait(): once the
+    # run's meta.json is terminal (the in-container runner finalized), wait()
+    # reaps the stray exec and returns its exit code instead of blocking ~grace.
+    rt = DockerRuntime()
+    rt._REUSE_WAIT_POLL_S = 0.01
+    handle = _reuse_handle(tmp_path, status="finished", exit_code=0)
+    proc = _FakeProc(poll_rc=None)
+    rt._procs[str(handle.run_dir)] = proc
+    assert rt.wait(handle, timeout=5.0) == 0
+    assert proc.killed is True                                  # stray exec reaped
+    assert not (handle.run_dir / reuse.MARKER_FILE).exists()    # marker cleared
+
+
+def test_wait_reuse_exec_returns_proc_rc_when_exec_exits(tmp_path):
+    # Normal case: the exec returns -> use its rc, don't consult meta.
+    rt = DockerRuntime()
+    handle = _reuse_handle(tmp_path, status=None)
+    rt._procs[str(handle.run_dir)] = _FakeProc(poll_rc=7)
+    assert rt.wait(handle, timeout=5.0) == 7
+    assert not (handle.run_dir / reuse.MARKER_FILE).exists()
+
+
+def test_wait_reuse_exec_times_out_when_meta_never_terminal(tmp_path):
+    # Genuine in-container hang (meta stays 'running', exec never returns): wait()
+    # still bounds on the grace timeout and returns None (unchanged behavior).
+    rt = DockerRuntime()
+    rt._REUSE_WAIT_POLL_S = 0.01
+    handle = _reuse_handle(tmp_path, status="running")
+    proc = _FakeProc(poll_rc=None)
+    rt._procs[str(handle.run_dir)] = proc
+    assert rt.wait(handle, timeout=0.2) is None
+    assert proc.killed is True
 
 
 def test_wait_supervised_ready(tmp_path):
