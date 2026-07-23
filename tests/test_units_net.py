@@ -268,6 +268,78 @@ def test_h2_grpc_replay_sink_can_reject_negative_feature_probe():
     assert seen[0]["grpc"]["negative_features"] == ["FEAT_ALPHA"]
 
 
+def test_mitm_sink_does_not_greet_a_silent_connection():
+    """A mitm connection that stays briefly silent (a TLS client slow to send its
+    ClientHello) must NOT receive an unsolicited plaintext greeting. That banner
+    would arrive mid-handshake and the client would read it as a TLS record,
+    failing with 'wrong version number' — the concurrent-service-request stall.
+    The sink must close such a connection quietly instead."""
+    ca = MitmCA()
+    sink = BuiltinSink(
+        on_interaction=lambda info: None, mitm=True, ca=ca,
+        sink_config={"type": "h2-grpc-replay", "tls_detect_timeout_s": 0.4,
+                     "idle_timeout_s": 2},
+    )
+    sink.start()
+    try:
+        raw = socket.create_connection(("127.0.0.1", sink.port), timeout=3)
+        # Wait long enough to observe the old fall-through greeting (~3.5s: the
+        # former 3s peek + 0.5s plaintext read). The fixed sink instead closes us
+        # at the 0.4s detection window, so recv returns b"" almost immediately.
+        raw.settimeout(6.0)
+        # Stay silent past the detection window; the sink must close us without
+        # sending the "220 ..." banner (which would poison a real handshake).
+        try:
+            leftover = raw.recv(64)
+        except socket.timeout:
+            leftover = b"__no_bytes__"
+        raw.close()
+    finally:
+        sink.stop()
+    assert b"220" not in leftover and b"containre-sink" not in leftover, (
+        f"sink sent an unsolicited plaintext greeting: {leftover!r}")
+
+
+def test_mitm_sink_completes_handshake_for_slow_tls_client():
+    """A TLS client that is slow to send its ClientHello (here 3.3s, past the old
+    hardcoded 3s peek window) must still complete the handshake and get answered.
+    Regression for concurrent application service requests starving on a saturated box:
+    the sink used to time the peek out and fall through to a plaintext greeting."""
+    ca = MitmCA()
+    seen: list[dict] = []
+    sink = BuiltinSink(
+        on_interaction=seen.append, mitm=True, ca=ca,
+        sink_config={"type": "h2-grpc-replay",
+                     "streaming_methods": ["StreamData"],
+                     "stream_initial_response_hex": "2200",
+                     "stream_response_hex": "1200",
+                     "idle_timeout_s": 5},
+    )
+    sink.start()
+    try:
+        cctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        cctx.load_verify_locations(cadata=ca.ca_pem().decode())
+        cctx.set_alpn_protocols(["h2"])
+        raw = socket.create_connection(("127.0.0.1", sink.port), timeout=3)
+        time.sleep(3.3)   # silent well past the former 3s detection window
+        tls = cctx.wrap_socket(raw, server_hostname="grpc.example.test")
+        assert tls.selected_alpn_protocol() == "h2"
+        request = (
+            H2_PREFACE
+            + h2_frame(0x4, 0, 0)
+            + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/StreamData application/grpc")
+            + h2_frame(0x0, 0x1, 1, b"\x00\x00\x00\x00\x01A")
+        )
+        tls.sendall(request)
+        data = recv_until(tls, b"\x00\x00\x00\x00\x02\x22\x00")
+        tls.close()
+    finally:
+        sink.stop()
+    assert b"\x00\x00\x00\x00\x02\x22\x00" in data   # streaming initial response
+    assert seen and seen[0]["op"] == "h2-grpc-replay"
+    assert seen[0]["grpc"]["methods"] == ["StreamData"]
+
+
 def test_h2_grpc_replay_rejects_oversized_frame():
     # A frame whose declared length exceeds the advertised 16384 max must be
     # rejected (GOAWAY) on the length field, before buffering the body.
