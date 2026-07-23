@@ -187,7 +187,7 @@ def test_summary_reports_h2_grpc_replay_sink_metrics(tmp_path):
                 "grpc": {
                     "requests": 1,
                     "messages": 1,
-                    "methods": ["CheckStatus"],
+                    "methods": ["Ping"],
                 },
                 "note": "client closed",
                 "tls": True,
@@ -205,7 +205,7 @@ def test_summary_reports_h2_grpc_replay_sink_metrics(tmp_path):
                 "grpc": {
                     "requests": 1,
                     "messages": 5,
-                    "methods": ["BeginStreaming"],
+                    "methods": ["StreamData"],
                     "negative_features": ["FEAT_ALPHA", "FEAT_ALPHA"],
                 },
                 "note": "client closed",
@@ -219,12 +219,12 @@ def test_summary_reports_h2_grpc_replay_sink_metrics(tmp_path):
     assert summary["metrics"]["network.sink_interaction_count"] == 2
     assert summary["metrics"]["network.h2_grpc_replay_interaction_count"] == 2
     assert summary["metrics"]["network.h2_grpc_replay_messages"] == 6
-    assert summary["metrics"]["network.h2_grpc_replay_methods"] == ["BeginStreaming", "CheckStatus"]
+    assert summary["metrics"]["network.h2_grpc_replay_methods"] == ["Ping", "StreamData"]
     assert summary["metrics"]["network.h2_grpc_replay_negative_feature_count"] == 2
     assert summary["metrics"]["network.h2_grpc_replay_negative_features"] == {"FEAT_ALPHA": 2}
     rendered = markdown(summary)
     assert "## Simulated Sink Interactions" in rendered
-    assert "`BeginStreaming, CheckStatus`" in rendered
+    assert "`Ping, StreamData`" in rendered
     assert "FEAT_ALPHA:2" in rendered
 
 

@@ -232,7 +232,7 @@ def test_h2_grpc_replay_sink_can_reject_negative_feature_probe():
         ca=ca,
         sink_config={
             "type": "h2-grpc-replay",
-            "unary_methods": ["CheckStatus"],
+            "unary_methods": ["Ping"],
             "negative_feature_substrings": ["FEAT_ALPHA"],
             "negative_grpc_status": "5",
             "negative_grpc_message": "feature {feature} is not expected to exist in the server",
@@ -251,7 +251,7 @@ def test_h2_grpc_replay_sink_can_reject_negative_feature_probe():
             H2_PREFACE
             + h2_frame(0x4, 0, 0)
             + h2_frame(0x4, 0x1, 0)
-            + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/CheckStatus application/grpc")
+            + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/Ping application/grpc")
             + h2_frame(0x0, 0x1, 1, b"\x00\x00\x00\x00\x0aFEAT_ALPHA")
         )
         tls.sendall(request)
@@ -272,7 +272,7 @@ def test_mitm_sink_does_not_greet_a_silent_connection():
     """A mitm connection that stays briefly silent (a TLS client slow to send its
     ClientHello) must NOT receive an unsolicited plaintext greeting. That banner
     would arrive mid-handshake and the client would read it as a TLS record,
-    failing with 'wrong version number' — the concurrent-license-checkout stall.
+    failing with 'wrong version number' — the concurrent-client handshake stall.
     The sink must close such a connection quietly instead."""
     ca = MitmCA()
     sink = BuiltinSink(
@@ -303,14 +303,14 @@ def test_mitm_sink_does_not_greet_a_silent_connection():
 def test_mitm_sink_completes_handshake_for_slow_tls_client():
     """A TLS client that is slow to send its ClientHello (here 3.3s, past the old
     hardcoded 3s peek window) must still complete the handshake and get answered.
-    Regression for concurrent a licensed backend license checkouts starving on a saturated box:
+    Regression for many concurrent TLS clients starving on a saturated box:
     the sink used to time the peek out and fall through to a plaintext greeting."""
     ca = MitmCA()
     seen: list[dict] = []
     sink = BuiltinSink(
         on_interaction=seen.append, mitm=True, ca=ca,
         sink_config={"type": "h2-grpc-replay",
-                     "streaming_methods": ["BeginStreaming"],
+                     "streaming_methods": ["StreamData"],
                      "stream_initial_response_hex": "2200",
                      "stream_response_hex": "1200",
                      "idle_timeout_s": 5},
@@ -327,7 +327,7 @@ def test_mitm_sink_completes_handshake_for_slow_tls_client():
         request = (
             H2_PREFACE
             + h2_frame(0x4, 0, 0)
-            + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/BeginStreaming application/grpc")
+            + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/StreamData application/grpc")
             + h2_frame(0x0, 0x1, 1, b"\x00\x00\x00\x00\x01A")
         )
         tls.sendall(request)
@@ -337,7 +337,7 @@ def test_mitm_sink_completes_handshake_for_slow_tls_client():
         sink.stop()
     assert b"\x00\x00\x00\x00\x02\x22\x00" in data   # streaming initial response
     assert seen and seen[0]["op"] == "h2-grpc-replay"
-    assert seen[0]["grpc"]["methods"] == ["BeginStreaming"]
+    assert seen[0]["grpc"]["methods"] == ["StreamData"]
 
 
 def test_h2_grpc_replay_bounds_a_stalled_partial_preface():

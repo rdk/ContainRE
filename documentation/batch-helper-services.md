@@ -90,7 +90,7 @@ network:
   sink:
     type: h2-grpc-replay
     listen_port: 443
-    unary_methods: ["CheckStatus"]
+    unary_methods: ["Ping"]
     streaming_methods: ["BeginSession"]
     unary_response_hex: ""
     stream_initial_response_hex: "2200"

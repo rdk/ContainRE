@@ -29,7 +29,7 @@ def write_capture(path) -> None:
             "hex": (
                 H2_PREFACE
                 + h2_frame(0x4, 0, 0)
-                + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/CheckStatus application/grpc")
+                + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/Ping application/grpc")
                 + h2_frame(0x0, 0x1, 1, b"\x00\x00\x00\x00\x01A")
             ).hex(),
         },
@@ -46,7 +46,7 @@ def write_capture(path) -> None:
             "hex": (
                 H2_PREFACE
                 + h2_frame(0x4, 0, 0)
-                + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/BeginStreaming application/grpc")
+                + h2_frame(0x1, 0x4, 1, b":path /pkg.Service/StreamData application/grpc")
                 + h2_frame(0x0, 0, 1, b"\x00\x00\x00\x00\x01B")
             ).hex(),
         },
@@ -79,8 +79,8 @@ def test_infer_h2_grpc_replay_from_capture(tmp_path):
     assert result["warnings"] == []
     assert result["sink"] == {
         "type": "h2-grpc-replay",
-        "unary_methods": ["CheckStatus"],
-        "streaming_methods": ["BeginStreaming"],
+        "unary_methods": ["Ping"],
+        "streaming_methods": ["StreamData"],
         "unary_response_hex": "",
         "stream_initial_response_hex": "2200",
         "stream_response_hex": "1200",
@@ -100,8 +100,8 @@ def test_cli_infer_h2_grpc_replay_outputs_yaml_sink(tmp_path):
     assert result.exit_code == 0
     sink = yaml.safe_load(result.stdout)
     assert sink["type"] == "h2-grpc-replay"
-    assert sink["unary_methods"] == ["CheckStatus"]
-    assert sink["streaming_methods"] == ["BeginStreaming"]
+    assert sink["unary_methods"] == ["Ping"]
+    assert sink["streaming_methods"] == ["StreamData"]
     assert sink["stream_initial_response_hex"] == "2200"
     assert sink["stream_response_hex"] == "1200"
 
