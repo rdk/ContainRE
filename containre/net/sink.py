@@ -67,6 +67,16 @@ class BuiltinSink:
         self._grpc_stream_initial_response = self._hex_payload("stream_initial_response_hex", "")
         self._grpc_stream_response = self._hex_payload("stream_response_hex", "")
         self._grpc_idle_timeout_s = float(self.sink_config.get("idle_timeout_s", 30.0))
+        # TLS interception timing (mitm only). The *detection* window must tolerate
+        # a client that is slow to send its ClientHello after connect() under heavy
+        # load, and the *handshake* timeout must tolerate slow handshake round-trips.
+        # These were hardcoded 3s / 0.5s, which starved concurrent TLS clients on a
+        # saturated box into "wrong version number" checkout failures (a slow client
+        # got the plaintext fall-through greeting mid-handshake). Generous by default.
+        self._tls_detect_timeout_s = float(self.sink_config.get("tls_detect_timeout_s", 30.0))
+        self._tls_handshake_timeout_s = float(
+            self.sink_config.get("tls_handshake_timeout_s", 30.0)
+        )
         self._grpc_send_pings = bool(self.sink_config.get("server_pings", True))
         self._grpc_record_payloads = bool(self.sink_config.get("record_payloads", False))
         self._grpc_payload_preview_bytes = max(
@@ -147,32 +157,57 @@ class BuiltinSink:
                 self._handlers = [t for t in self._handlers if t.is_alive()]  # prune finished
                 self._handlers.append(h)
 
+    def _peek_first_byte(self, conn: socket.socket, timeout_s: float) -> bytes:
+        """Peek (do not consume) the connection's first byte, blocking up to
+        ``timeout_s``, to classify TLS vs plaintext. Returns the byte, or ``b""``
+        if the peer sent nothing within the window or closed first.
+
+        ``conn`` carries a short per-recv timeout so the loop re-checks ``_stop``
+        promptly during shutdown; the overall window is ``timeout_s``. A bare
+        EOF (``recv`` -> ``b""``) returns immediately rather than busy-looping to
+        the deadline.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while time.monotonic() < deadline and not self._stop.is_set():
+            try:
+                return conn.recv(1, socket.MSG_PEEK)  # 1 byte, or b"" on EOF
+            except socket.timeout:
+                continue  # nothing yet — keep waiting within the window
+            except OSError:
+                return b""
+        return b""
+
     def _handle(self, conn: socket.socket) -> None:
         conn.settimeout(0.5)
         tls = False
         if self._tls_ctx is not None:
-            head = b""
-            deadline = time.monotonic() + 3.0
-            while time.monotonic() < deadline and not self._stop.is_set():
-                try:
-                    head = conn.recv(1, socket.MSG_PEEK)
-                except socket.timeout:
-                    continue
-                except OSError:
-                    head = b""
-                    break
-                if head:
-                    break
-            if head[:1] == b"\x16":  # TLS handshake record -> terminate TLS (MITM)
+            head = self._peek_first_byte(conn, self._tls_detect_timeout_s)
+            if head == b"\x16":  # TLS handshake record -> terminate TLS (MITM)
+                # A generous handshake timeout: under load the client's handshake
+                # round-trips can take seconds, and the default 0.5s would abort an
+                # otherwise-valid handshake.
+                conn.settimeout(self._tls_handshake_timeout_s)
                 try:
                     conn = self._tls_ctx.wrap_socket(conn, server_side=True)
                     tls = True
+                    conn.settimeout(0.5)
                 except (ssl.SSLError, OSError):
                     self._close(conn)
                     if self.on_interaction:
                         self.on_interaction({"op": "connect", "proto": "tls",
                                              "tls": True, "note": "tls handshake failed"})
                     return
+            elif not head:
+                # Nothing arrived within the detection window: a bare connect/close
+                # probe, or a client too slow even for the (generous) window. In
+                # mitm mode we must NOT send an unsolicited plaintext greeting — a
+                # client that is mid-TLS-handshake would read those bytes as a TLS
+                # record and fail with "wrong version number", poisoning its
+                # checkout. Close quietly; a real client just reconnects. Only a
+                # genuine plaintext peer (a non-0x16 first byte) falls through to
+                # the responder below.
+                self._close(conn)
+                return
         if self.sink_type == "h2-grpc-replay" and tls:
             try:
                 info = self._respond_h2_grpc_replay(conn)
