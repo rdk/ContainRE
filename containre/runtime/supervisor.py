@@ -61,6 +61,11 @@ class Supervisor:
         self.setup_commands = json.loads(os.environ.get("CONTAINRE_SETUP_COMMANDS") or "[]")
         self.shell = os.environ.get("CONTAINRE_COMMAND_SHELL") or "/bin/sh"
         self.ready_probe = os.environ.get("CONTAINRE_READY_PROBE") or ""
+        # Bound each setup command / ready probe: a hung one (a job server that
+        # never returns, a wedged probe) must not block bring-up OR the mid-life
+        # recovery loop forever — that would leave the shared container running but
+        # permanently unready, silently failing every later exec closed.
+        self.command_timeout_s = float(os.environ.get("CONTAINRE_COMMAND_TIMEOUT_S") or 600.0)
         self.marker = Path(os.environ.get("CONTAINRE_READY_MARKER") or "/work/.containre-ready")
         self._ca: MitmCA | None = None
         self._sink: BuiltinSink | None = None
@@ -100,7 +105,12 @@ class Supervisor:
         """Run each setup command once; ALL must exit 0 (no `|| true`) — this is
         the real job-server readiness signal (C3/C4)."""
         for cmd in self.setup_commands:
-            rc = subprocess.run([self.shell, "-c", str(cmd)], env=os.environ.copy()).returncode
+            try:
+                rc = subprocess.run([self.shell, "-c", str(cmd)], env=os.environ.copy(),
+                                    timeout=self.command_timeout_s).returncode
+            except subprocess.TimeoutExpired:
+                _log(f"setup command timed out after {self.command_timeout_s:g}s: {cmd}")
+                return False
             if rc != 0:
                 _log(f"setup command failed (rc={rc}): {cmd}")
                 return False
@@ -109,8 +119,12 @@ class Supervisor:
     def _probe_ok(self) -> bool:
         if not self.ready_probe:
             return True
-        return subprocess.run([self.shell, "-c", self.ready_probe],
-                              env=os.environ.copy()).returncode == 0
+        try:
+            return subprocess.run([self.shell, "-c", self.ready_probe], env=os.environ.copy(),
+                                  timeout=self.command_timeout_s).returncode == 0
+        except subprocess.TimeoutExpired:
+            _log(f"ready probe timed out after {self.command_timeout_s:g}s")
+            return False
 
     # -- readiness ----------------------------------------------------------
     def _mark_ready(self) -> None:

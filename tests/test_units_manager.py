@@ -153,7 +153,7 @@ def test_reap_marks_unfinalized_run_as_error(tmp_path):
     manager = RunManager(runs_root=tmp_path, max_concurrent=1)
     handle = object()
     manager._active["run"] = handle
-    manager.runtime.wait = lambda received: 7
+    manager.runtime.wait = lambda received, timeout=None: 7
 
     manager._reap("run", handle)
 

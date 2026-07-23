@@ -172,17 +172,33 @@ def stop_if_idle(runs_root: Path, container: str, *, idle_s: float = 0.0,
             last = 0.0
         if (time.time() if now is None else now) - last < idle_s:
             return False
-    subprocess.run(["docker", "stop", container],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(["docker", "stop", container],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=_EXEC_TIMEOUT_S + 15.0)  # docker stop has its own ~10s grace
+    except subprocess.TimeoutExpired:
+        return False  # daemon wedged; leave the activity stamp so we retry later
     _activity_path(runs_root, container).unlink(missing_ok=True)
     return True
 
 
 # -- in-container process-group primitives ------------------------------------
 
-def _exec(container: str, argv: list[str]) -> str | None:
-    proc = subprocess.run(["docker", "exec", container, *argv],
-                          capture_output=True, text=True)
+#: `docker exec`/`stop` control ops are bounded — under a wedged/overloaded
+#: docker daemon (or a hung in-container probe) an unbounded call would hang the
+#: liveness/kill/idle paths (and the wedged-exec recovery in DockerRuntime.wait,
+#: which routes through stop()->_kill_pgid->_exec). Distinct from a fast non-zero
+#: exit (container gone): a TIMEOUT means "can't tell", handled conservatively.
+_EXEC_TIMEOUT_S = 30.0
+_EXEC_TIMEDOUT = object()  # sentinel: docker exec did not return in time
+
+
+def _exec(container: str, argv: list[str], *, timeout: float = _EXEC_TIMEOUT_S):
+    try:
+        proc = subprocess.run(["docker", "exec", container, *argv],
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return _EXEC_TIMEDOUT
     return proc.stdout if proc.returncode == 0 else None
 
 
@@ -200,6 +216,10 @@ def _pgid_alive(container: str, pgid: int) -> bool:
         "print(n)\n" % pgid
     )
     out = _exec(container, ["python3", "-c", probe])
+    if out is _EXEC_TIMEDOUT:
+        # Probe wedged (daemon hung): assume ALIVE so the busy-guard/idle-reaper
+        # never replace or stop a container whose liveness we couldn't read.
+        return True
     try:
         return int((out or "0").strip()) > 0
     except ValueError:
