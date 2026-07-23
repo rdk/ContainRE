@@ -16,7 +16,7 @@ DEFAULTS: dict = {
     # by default the sandbox uses host resources rather than being throttled. A
     # low default (cpu=1, pids=128, mem=512) silently capped every run — and a
     # small pids/nofile cap deadlocks heavyweight nested tooling (e.g. a
-    # a worker service) under concurrency. Only wallclock_s (an always-on
+    # worker service) under concurrency. Only wallclock_s (an always-on
     # safety timer) and disk_mb (tracer disk guard) are defaulted. A policy
     # sandboxing an UNTRUSTED specimen should set explicit cpu/mem_mb/pids to
     # bound fork bombs, memory bombs, and CPU abuse (see DockerRuntime.

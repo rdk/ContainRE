@@ -272,7 +272,7 @@ def test_mitm_sink_does_not_greet_a_silent_connection():
     """A mitm connection that stays briefly silent (a TLS client slow to send its
     ClientHello) must NOT receive an unsolicited plaintext greeting. That banner
     would arrive mid-handshake and the client would read it as a TLS record,
-    failing with 'wrong version number' — the concurrent-service-request stall.
+    failing with 'wrong version number' — the concurrent-client handshake stall.
     The sink must close such a connection quietly instead."""
     ca = MitmCA()
     sink = BuiltinSink(
@@ -303,7 +303,7 @@ def test_mitm_sink_does_not_greet_a_silent_connection():
 def test_mitm_sink_completes_handshake_for_slow_tls_client():
     """A TLS client that is slow to send its ClientHello (here 3.3s, past the old
     hardcoded 3s peek window) must still complete the handshake and get answered.
-    Regression for concurrent application service requests starving on a saturated box:
+    Regression for many concurrent TLS clients starving on a saturated box:
     the sink used to time the peek out and fall through to a plaintext greeting."""
     ca = MitmCA()
     seen: list[dict] = []

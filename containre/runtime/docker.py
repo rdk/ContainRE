@@ -347,7 +347,7 @@ class DockerRuntime:
         sets; an unset limit means *no* cap, so the sandbox uses host resources
         by default rather than being silently throttled. This matters for
         heavyweight nested tooling: a low default ``pids`` (formerly 128) or
-        ``nofile`` (formerly 1024) is enough to DEADLOCK e.g. a worker job
+        ``nofile`` (formerly 1024) is enough to DEADLOCK e.g. a application job
         server under concurrency — a fork/thread it needs to release a lock
         fails, and everything parks on a futex at 0% CPU.
 
