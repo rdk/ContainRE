@@ -258,7 +258,6 @@ class DockerRuntime:
                 raise DockerError(f"docker start {name} failed: {proc.stderr.strip() or proc.stdout.strip()}")
             return
 
-        limits = job.policy.get("limits", {})
         if supervised:
             entry, env_args, extra_labels = self._supervised_spec(job)
         else:
@@ -272,13 +271,10 @@ class DockerRuntime:
             "--cap-drop", "ALL",
             "--cap-add", "DAC_OVERRIDE",
             "--security-opt", "no-new-privileges",
-            "--ulimit", "nofile=1024:4096",
             *self._docker_user_args(job.policy),
             *self._network_args(job.policy),
             *self._extra_host_args(job.policy),
-            "--pids-limit", str(int(limits.get("pids", 128))),
-            "--memory", f"{int(limits.get('mem_mb', 512))}m",
-            "--cpus", str(limits.get("cpu", 1)),
+            *self._resource_limit_args(job.policy),
             *env_args,
             *self._read_only_mount_args(job.policy),
             "-v", f"{runs_root}:/runs",
@@ -320,6 +316,39 @@ class DockerRuntime:
         entry = ["python3", "-m", "containre.runtime.supervisor"]
         labels = ["--label", f"{_REUSE_SUPERVISED_LABEL}=1"]
         return entry, env_args, labels
+
+    def _resource_limit_args(self, policy: dict) -> list[str]:
+        """Docker resource-ceiling flags — OPT-IN, no artificial defaults.
+
+        A ceiling is imposed ONLY for the ``limits`` keys the policy actually
+        sets; an unset limit means *no* cap, so the sandbox uses host resources
+        by default rather than being silently throttled. This matters for
+        heavyweight nested tooling: a low default ``pids`` (formerly 128) or
+        ``nofile`` (formerly 1024) is enough to DEADLOCK e.g. a worker job
+        server under concurrency — a fork/thread it needs to release a lock
+        fails, and everything parks on a futex at 0% CPU.
+
+        Security note: a policy sandboxing an UNTRUSTED specimen should set
+        explicit ``pids``/``mem_mb``/``cpu`` (and optionally ``nofile``) to bound
+        fork bombs, memory bombs, CPU abuse, and fd exhaustion. ``kill_on:
+        [oom, pids_exceeded]`` keys off these cgroup ceilings, so it is a no-op
+        unless the corresponding limit is set.
+        """
+        limits = policy.get("limits", {})
+        args: list[str] = []
+        pids = limits.get("pids")
+        if pids is not None:
+            args += ["--pids-limit", str(int(pids))]
+        mem_mb = limits.get("mem_mb")
+        if mem_mb is not None:
+            args += ["--memory", f"{int(mem_mb)}m"]
+        cpu = limits.get("cpu")
+        if cpu is not None:
+            args += ["--cpus", str(cpu)]
+        nofile = limits.get("nofile")
+        if nofile is not None:
+            args += ["--ulimit", f"nofile={int(nofile)}:{int(nofile)}"]
+        return args
 
     def _wait_supervised_ready(self, work_dir: Path, policy: dict, *, poll_s: float = 1.0) -> None:
         """Block until the supervised container publishes /work/.containre-ready
@@ -401,7 +430,6 @@ class DockerRuntime:
         self.ensure_image()
         if self._reuse_requested(job.policy):
             return self._start_reused(job)
-        limits = job.policy.get("limits", {})
         run_dir = job.run_dir.resolve()
         workdir = Path(job.cwd).resolve()
         specimen = Path(job.specimen_path).resolve()
@@ -426,14 +454,10 @@ class DockerRuntime:
             *self._trace_security_args(job.policy),
             "--cap-add", "DAC_OVERRIDE",
             "--security-opt", "no-new-privileges",
-            # Keep the in-container limit modest for tools that inspect fd ranges.
-            "--ulimit", "nofile=1024:4096",
             *self._docker_user_args(job.policy),
             *self._network_args(job.policy),
             *self._extra_host_args(job.policy),
-            "--pids-limit", str(int(limits.get("pids", 128))),
-            "--memory", f"{int(limits.get('mem_mb', 512))}m",
-            "--cpus", str(limits.get("cpu", 1)),
+            *self._resource_limit_args(job.policy),
             *self._read_only_mount_args(job.policy),
             "-v", f"{specimen}:{container_specimen}:ro",
             "-v", f"{workdir}:/work",

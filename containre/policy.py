@@ -12,7 +12,16 @@ from . import contracts
 DEFAULTS: dict = {
     "schema_version": 1,
     "specimen": {"args": [], "stdin": None, "env": {}, "cwd": "/work", "container_path": None},
-    "limits": {"cpu": 1, "mem_mb": 512, "pids": 128, "wallclock_s": 120, "disk_mb": 256},
+    # Resource ceilings are OPT-IN: cpu/mem_mb/pids/nofile are NOT defaulted, so
+    # by default the sandbox uses host resources rather than being throttled. A
+    # low default (cpu=1, pids=128, mem=512) silently capped every run — and a
+    # small pids/nofile cap deadlocks heavyweight nested tooling (e.g. a
+    # a worker service) under concurrency. Only wallclock_s (an always-on
+    # safety timer) and disk_mb (tracer disk guard) are defaulted. A policy
+    # sandboxing an UNTRUSTED specimen should set explicit cpu/mem_mb/pids to
+    # bound fork bombs, memory bombs, and CPU abuse (see DockerRuntime.
+    # _resource_limit_args); note kill_on:[oom] is a no-op unless mem_mb is set.
+    "limits": {"wallclock_s": 120, "disk_mb": 256},
     "network": {
         "posture": "simulate",
         "simulate": True,
