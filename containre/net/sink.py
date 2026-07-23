@@ -487,7 +487,13 @@ class BuiltinSink:
                     try:
                         chunk = conn.recv(4096)
                     except socket.timeout:
-                        continue
+                        # Re-check idle_deadline in the OUTER loop rather than spin
+                        # here forever. A `continue` would stay in this inner loop
+                        # and bypass the idle timeout entirely, so a client that
+                        # sends a partial preface then stalls would hang the handler
+                        # (leaking a thread/fd/pid) for the container's lifetime.
+                        # The sibling frame loops below already break for this reason.
+                        break
                     except OSError as exc:
                         info["note"] = f"recv failed before preface: {exc.__class__.__name__}"
                         return info
@@ -497,6 +503,8 @@ class BuiltinSink:
                     info["bytes_in"] += len(chunk)
                     buf += chunk
                     idle_deadline = time.monotonic() + self._grpc_idle_timeout_s
+                if len(buf) < len(_H2_PREFACE):
+                    continue  # incomplete preface — outer loop bounds it via idle_deadline
                 if not buf.startswith(_H2_PREFACE):
                     info["note"] = "missing HTTP/2 client preface"
                     info["preview"] = self._ascii_preview(buf)
