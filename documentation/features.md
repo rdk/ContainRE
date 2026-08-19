@@ -15,6 +15,10 @@ inspectable after the fact.
   larger installed applications.
 - Optional Docker specimen path preservation for launchers that infer install
   roots from their executable path.
+- Opt-in host device passthrough (`runtime.docker_devices`) for trusted compute
+  workloads that need real hardware, such as a GPU. Off by default, and reported
+  as an explicit isolation trade-off — see
+  [Device passthrough](batch-helper-services.md#device-passthrough-gpus).
 
 ## Tracing
 

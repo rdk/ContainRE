@@ -362,6 +362,12 @@
           "description": "DockerRuntime-only user passed to docker run/exec via --user, for example '1000:1000'. Null or empty means Docker's image default user.",
           "default": null
         },
+        "docker_devices": {
+          "type": "array",
+          "description": "DockerRuntime-only host device nodes exposed to the container via --device, for example ['/dev/nvidiactl','/dev/nvidia0','/dev/nvidia-uvm'] for GPU compute. Each entry is an absolute /dev path, mapped to the same path inside the container. WARNING: device passthrough REDUCES isolation - it grants the specimen direct hardware access that the tracer cannot observe, so behaviour on the device is absent from the recorded evidence. Use only for trusted compute workloads. Part of the reuse container's creation config: changing it recreates the keyed container.",
+          "items": { "type": "string", "pattern": "^/dev/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$" },
+          "default": []
+        },
         "docker_reuse_supervised": {
           "type": "boolean",
           "description": "DockerRuntime-only. When true, the reuse container runs the supervisor entrypoint (hosting the built-in sink + runtime.setup_commands as singletons, with a readiness gate) instead of a bare sleep, so workload_only execs can share it. Domain-agnostic; the hosted services are whatever network.sink + setup_commands describe.",

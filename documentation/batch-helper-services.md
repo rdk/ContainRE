@@ -71,6 +71,49 @@ manually when finished:
 docker rm -f containre-reuse-batch-screen
 ```
 
+## Device Passthrough (GPUs)
+
+Some batch workloads are not CPU-bound: an MD engine, a trained model, or any
+CUDA/ROCm application needs the host's accelerator. Docker's default device
+cgroup denies access to hardware, and a bind mount does **not** change that — it
+supplies the device inode while access is still refused — so the container must
+be given the device explicitly:
+
+```yaml
+runtime:
+  docker_devices:
+    - /dev/nvidiactl
+    - /dev/nvidia0
+    - /dev/nvidia-uvm
+```
+
+Each entry is an absolute `/dev` path, mapped to the same path inside the
+container. Nothing else is required: no special image, and no
+`nvidia-container-toolkit` — bind-mount the host's user-space driver library
+alongside it and the vendor stack resolves normally:
+
+```yaml
+files:
+  read_only_mounts:
+    - { source: /lib/x86_64-linux-gnu/libcuda.so.1, target: /lib/x86_64-linux-gnu/libcuda.so.1 }
+    # add libnvidia-ml.so.1 if the workload uses NVML (e.g. via pynvml)
+```
+
+This composes with the rest of the containment posture: it works with
+`--network none`, all capabilities dropped, `no-new-privileges`, and a non-root
+`runtime.docker_user`.
+
+> **It reduces isolation, and ContainRE says so.** Device passthrough grants the
+> specimen direct, often DMA-capable hardware access, and the tracer cannot
+> observe what happens on the device — so that behaviour is absent from the
+> recorded evidence. A `DevicePassthroughWarning` is emitted on every run that
+> uses it. Treat it like `network.docker_network: host`: appropriate for trusted
+> compute, not for analysing an untrusted binary.
+
+Device entries are part of the reuse container's creation config, so changing
+them recreates the keyed container. A container created with GPU access is never
+silently reused for a run that asked for none, or vice versa.
+
 ## Offline Service Policy
 
 Combine reuse with Docker network isolation and a local service emulator:

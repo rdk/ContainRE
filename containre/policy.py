@@ -60,6 +60,9 @@ DEFAULTS: dict = {
         "docker_reuse_container": False,
         "docker_reuse_key": "default",
         "docker_user": None,
+        # Device passthrough is OPT-IN and empty by default: a sandbox exposes no
+        # host hardware unless a policy asks for it (see DockerRuntime._device_args).
+        "docker_devices": [],
     },
     "report": {"assertions": []},
     # Default to safety limits only. The tracer-observable triggers
