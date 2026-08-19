@@ -678,3 +678,73 @@ def test_handle_execve_captures_path_and_argv():
 
     assert events[0].kind == Kind.PROC
     assert events[0].data == {"op": "exec", "path": "/bin/echo", "argv": ["echo", "hello"]}
+
+
+def test_leader_pgid_is_recorded_for_every_untraced_run(tmp_path, monkeypatch):
+    """stop() / `reuse kill` / `reuse reap` all address a run by its leader pgid.
+
+    It used to be written only for workload_only execs, so an ordinary
+    reuse-container run recorded nothing and could not be stopped at all —
+    DockerRuntime.stop() found no pgid and silently killed nothing.
+    """
+    from containre.interfaces import Job
+    from containre.tracer import runner as R
+
+    for workload_only in (False, True):
+        run_dir = tmp_path / f"run-{workload_only}"
+        run_dir.mkdir()
+        recorded = {}
+
+        def fake_run_without_tracer(job, console_path, on_start=None):
+            assert on_start is not None, "no pgid writer installed"
+            on_start(4242)
+            recorded["written"] = (run_dir / "leader.pgid").read_text()
+            return 0, None
+
+        monkeypatch.setattr(R, "_run_without_tracer", fake_run_without_tracer)
+        monkeypatch.setattr(R, "RunSession", lambda *a, **k: _StubSession(run_dir))
+        policy = {
+            "trace": {"tracer": "none"},
+            "runtime": {"workload_only": workload_only},
+            "network": {"posture": "deny"},
+            "files": {},
+            "limits": {},
+        }
+        job = Job(run_dir=run_dir, specimen_path="/bin/true", args=[], env={},
+                  cwd=str(tmp_path), stdin_path=None, policy=policy)
+        if workload_only:
+            (tmp_path / "ready").write_text("1")
+            monkeypatch.setattr(R.Path, "exists", lambda self: True)
+        R.execute(job)
+        assert recorded.get("written") == "4242", f"workload_only={workload_only}"
+
+
+class _StubSession:
+    """Minimal RunSession stand-in: execute() only needs these."""
+
+    def __init__(self, run_dir):
+        self.run_dir = run_dir
+        self.store = _StubStore()
+
+    def emit(self, *a, **k):
+        pass
+
+    def snapshot(self, *a, **k):
+        pass
+
+    def finalize(self, *a, **k):
+        pass
+
+    def close_detectors(self):
+        pass
+
+    def write_pcap(self, *a, **k):
+        pass
+
+    def capture_artifacts(self):
+        pass
+
+
+class _StubStore:
+    def update_meta(self, **kw):
+        pass
