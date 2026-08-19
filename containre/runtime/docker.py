@@ -34,6 +34,15 @@ class HostNetworkingWarning(UserWarning):
     isolation - the specimen shares the host loopback/interfaces and is contained
     only by the ptrace egress allowlist."""
 
+
+class DevicePassthroughWarning(UserWarning):
+    """Raised when a run maps host device nodes into the container via
+    runtime.docker_devices. This reduces isolation in two distinct ways: the
+    specimen gains direct (often DMA-capable) hardware access, and the tracer
+    cannot observe what happens on the device - so behaviour there is absent
+    from the recorded evidence. Intended for trusted compute workloads
+    (e.g. GPU), not for analysing untrusted binaries."""
+
 _IMAGE = "containre/runner:0.1"
 # Label marking a reuse container as SUPERVISED (its entrypoint hosts the sink +
 # setup_commands as singletons). Purely generic — no workload domain implied.
@@ -41,6 +50,10 @@ _REUSE_SUPERVISED_LABEL = "containre.reuse.supervised"
 _REPO = Path(__file__).resolve().parents[2]
 _SAFE_REUSE_KEY = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SAFE_DOCKER_USER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*)?$")
+#: A device entry is a plain absolute /dev path, mapped to the same path in the
+#: container. Deliberately narrow: no `host:container:perms` remapping (nothing
+#: needs it yet) and no traversal, so a policy cannot reach outside /dev.
+_SAFE_DEVICE_PATH = re.compile(r"^/dev/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 
 
 class DockerError(RuntimeError):
@@ -183,6 +196,37 @@ class DockerRuntime:
             raise DockerError(f"invalid runtime.docker_user: {user!r}")
         return ["--user", user]
 
+    def _device_args(self, policy: dict) -> list[str]:
+        """`--device` flags for runtime.docker_devices (OPT-IN, empty by default).
+
+        A bind-mount is NOT a substitute: mounting a device node supplies the
+        inode but the container's device cgroup still denies access, so hardware
+        passthrough genuinely requires --device.
+
+        This widens the sandbox, so it is treated like docker_network=host: the
+        request is honoured, and a warning makes the trade-off explicit rather
+        than silent. Device paths are validated against a narrow allowlist and
+        mapped 1:1 into the container.
+        """
+        devices = policy.get("runtime", {}).get("docker_devices") or []
+        if not devices:
+            return []
+        args: list[str] = []
+        for device in devices:
+            device = str(device)
+            if not _SAFE_DEVICE_PATH.fullmatch(device) or ".." in device.split("/"):
+                raise DockerError(f"invalid runtime.docker_devices entry: {device!r} "
+                                  "(expected an absolute /dev path)")
+            args += ["--device", device]
+        warnings.warn(
+            "runtime.docker_devices maps host hardware into the container "
+            f"({', '.join(str(d) for d in devices)}) - the specimen gets direct "
+            "device access and the tracer cannot observe what happens on it, so "
+            "that behaviour is missing from the recorded evidence. Use only for "
+            "trusted compute workloads.",
+            DevicePassthroughWarning, stacklevel=2)
+        return args
+
     def _reuse_requested(self, policy: dict) -> bool:
         return bool(policy.get("runtime", {}).get("docker_reuse_container", False))
 
@@ -207,6 +251,10 @@ class DockerRuntime:
             "extra_host_args": self._extra_host_args(job.policy),
             "read_only_mount_args": self._read_only_mount_args(job.policy),
             "docker_user_args": self._docker_user_args(job.policy),
+            # Device passthrough is fixed at container creation, so it is part of
+            # the container's identity: a GPU-bearing container must never be
+            # silently reused for a run that asked for no devices, or vice versa.
+            "device_args": self._device_args(job.policy),
             "runs_root": str(job.run_dir.resolve().parent),
             "workdir": str(workdir),
             "specimen_parent": str(specimen_parent),
@@ -298,6 +346,7 @@ class DockerRuntime:
             *self._network_args(job.policy),
             *self._extra_host_args(job.policy),
             *self._resource_limit_args(job.policy),
+            *self._device_args(job.policy),
             *env_args,
             *self._read_only_mount_args(job.policy),
             "-v", f"{runs_root}:/runs",
@@ -481,6 +530,7 @@ class DockerRuntime:
             *self._network_args(job.policy),
             *self._extra_host_args(job.policy),
             *self._resource_limit_args(job.policy),
+            *self._device_args(job.policy),
             *self._read_only_mount_args(job.policy),
             "-v", f"{specimen}:{container_specimen}:ro",
             "-v", f"{workdir}:/work",

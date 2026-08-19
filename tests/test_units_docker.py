@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from containre.interfaces import RunHandle
-from containre.runtime.docker import DockerError, DockerRuntime
+from containre.runtime.docker import DevicePassthroughWarning, DockerError, DockerRuntime
 
 pytestmark = pytest.mark.unit
 
@@ -64,3 +64,72 @@ def test_host_network_warns_about_lost_isolation():
             "trace": {"tracer": "ptrace"},
         })
     assert args == ["--network", "host"]
+
+
+# -- device passthrough (runtime.docker_devices) -------------------------------
+
+_GPU_DEVICES = ["/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-uvm"]
+
+
+def _dev_policy(devices):
+    return {"runtime": {"docker_devices": devices}}
+
+
+def test_no_devices_by_default():
+    # A sandbox exposes no host hardware unless a policy asks for it.
+    assert _rt()._device_args({}) == []
+    assert _rt()._device_args({"runtime": {}}) == []
+    assert _rt()._device_args(_dev_policy([])) == []
+
+
+def test_devices_become_device_flags():
+    with pytest.warns(DevicePassthroughWarning):
+        args = _rt()._device_args(_dev_policy(_GPU_DEVICES))
+    assert args == ["--device", "/dev/nvidiactl",
+                    "--device", "/dev/nvidia0",
+                    "--device", "/dev/nvidia-uvm"]
+
+
+def test_device_passthrough_warns_that_it_reduces_isolation():
+    # Mirrors the docker_network=host precedent: honoured, but never silent.
+    with pytest.warns(DevicePassthroughWarning, match="tracer cannot observe"):
+        _rt()._device_args(_dev_policy(["/dev/nvidia0"]))
+
+
+@pytest.mark.parametrize("bad", [
+    "/etc/passwd",              # outside /dev
+    "/dev/../etc/passwd",       # traversal
+    "/dev/nvidia0:/dev/x:rwm",  # host:container:perms remapping is not supported
+    "relative",
+    "/dev/",
+    "",
+])
+def test_invalid_device_paths_are_rejected(bad):
+    with pytest.raises(DockerError, match="docker_devices"):
+        _rt()._device_args(_dev_policy([bad]))
+
+
+def test_nested_dev_path_is_allowed():
+    with pytest.warns(DevicePassthroughWarning):
+        assert _rt()._device_args(_dev_policy(["/dev/nvidia-caps/nvidia-cap1"])) == [
+            "--device", "/dev/nvidia-caps/nvidia-cap1"]
+
+
+def test_devices_are_part_of_the_reuse_container_identity(tmp_path):
+    # Devices are fixed at container creation, so a GPU-bearing container must
+    # never be silently reused for a run that asked for none (or vice versa).
+    from containre.interfaces import Job
+
+    def _hash(devices):
+        pol = {"runtime": {"docker_reuse_container": True, "docker_devices": devices},
+               "trace": {"tracer": "none"}, "network": {"posture": "simulate"}}
+        job = Job(run_dir=tmp_path / "runs" / "r1", specimen_path="/bin/true", args=[],
+                  env={}, cwd=str(tmp_path), stdin_path=None, policy=pol)
+        return _rt()._reuse_config_hash(job, tmp_path, tmp_path)
+
+    with pytest.warns(DevicePassthroughWarning):
+        gpu = _hash(_GPU_DEVICES)
+        partial = _hash(["/dev/nvidia0"])
+    plain = _hash([])
+    assert gpu != plain
+    assert gpu != partial
