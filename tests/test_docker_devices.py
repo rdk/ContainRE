@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import warnings
 from pathlib import Path
 
 import pytest
@@ -147,6 +148,56 @@ def test_bind_mounting_device_nodes_is_not_enough(gpu_runtime, runs, probe):
     result = execute(pol, runs_root=runs, runtime=gpu_runtime, timeout=120)
     assert "CUDA_OK" not in _console(result)
     assert result.exit_code != 0
+
+
+def test_devices_reach_a_reuse_container_exec(gpu_runtime, runs, probe):
+    """The path real batch users take: devices on a long-lived reuse container.
+
+    Devices are set at `docker run` time and inherited by every `docker exec`,
+    so this checks the half the fresh-container test cannot: that the container
+    is created with them and the workload exec sees the GPU. Also asserts the
+    container is genuinely reused (same id across two runs), since a recreate
+    would mask a broken create.
+    """
+    pol = _policy(probe, _libcuda(), devices=GPU_DEVICES)
+    pol["runtime"]["docker_reuse_container"] = True
+    pol["runtime"]["docker_reuse_key"] = "devicetest"
+    container = "containre-reuse-devicetest"
+    try:
+        with pytest.warns(DevicePassthroughWarning):
+            first = execute(pol, runs_root=runs, runtime=gpu_runtime, timeout=180)
+            second = execute(pol, runs_root=runs, runtime=gpu_runtime, timeout=180)
+        for result in (first, second):
+            assert "CUDA_OK" in _console(result), _console(result)
+            assert result.exit_code == 0
+        ids = {subprocess.run(["docker", "inspect", "-f", "{{.Id}}", container],
+                              capture_output=True, text=True).stdout.strip()}
+        assert len(ids) == 1 and ids != {""}   # one container, still alive
+    finally:
+        subprocess.run(["docker", "rm", "-f", container],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def test_changing_devices_recreates_the_reuse_container(gpu_runtime, runs, probe):
+    """Devices are part of container identity, so a changed set must not be
+    silently inherited by a run that asked for something different."""
+    container = "containre-reuse-devicetest2"
+    def _run(devices):
+        pol = _policy(probe, _libcuda(), devices=devices)
+        pol["runtime"]["docker_reuse_container"] = True
+        pol["runtime"]["docker_reuse_key"] = "devicetest2"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DevicePassthroughWarning)
+            execute(pol, runs_root=runs, runtime=gpu_runtime, timeout=180)
+        return subprocess.run(["docker", "inspect", "-f", "{{.Id}}", container],
+                              capture_output=True, text=True).stdout.strip()
+    try:
+        with_gpu = _run(GPU_DEVICES)
+        without = _run([])
+        assert with_gpu and without and with_gpu != without
+    finally:
+        subprocess.run(["docker", "rm", "-f", container],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def test_invalid_device_path_fails_before_launch(gpu_runtime, runs, probe):
