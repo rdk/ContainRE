@@ -157,7 +157,13 @@ def _pgid_writer(job: Job):
     """Return a callback that records the workload's leader pgid at
     <run_dir>/leader.pgid — the generic handle ContainRE (and any external
     orchestrator) uses to tell whether this exec is still alive and to stop just
-    this exec's process group. The run dir is host-visible via the /runs mount."""
+    this exec's process group. The run dir is host-visible via the /runs mount.
+
+    Note what the pgid does and does not cover: it is the process group of the
+    specimen ContainRE launched. A specimen that hands work to a pre-existing
+    daemon (a job server, say) has descendants outside that group, and stopping
+    those is the specimen's own responsibility — ContainRE delivers the signal,
+    the workload defines what stopping means."""
     pgid_path = Path(job.run_dir) / "leader.pgid"
 
     def _write(pgid: int) -> None:
@@ -217,9 +223,14 @@ def execute(job: Job) -> int:
         if setup_reason:
             exit_code, kill_reason = setup_exit, setup_reason
         elif tracer_mode == "none":
+            # Record the leader pgid for EVERY untraced run, not just
+            # workload_only ones. stop() / `reuse kill` / `reuse reap` all address
+            # a run by that pgid, and with no file recorded they silently do
+            # nothing at all — a reuse-container run could not be stopped, only
+            # abandoned. Writing it is free for a non-reuse run (one small file in
+            # the run dir) and is what makes the reuse verbs work everywhere.
             exit_code, kill_reason = _run_without_tracer(
-                job, str(job.run_dir / "console.log"),
-                on_start=_pgid_writer(job) if workload_only else None)
+                job, str(job.run_dir / "console.log"), on_start=_pgid_writer(job))
         else:
             tracer = PtraceTracer(
                 specimen=job.specimen_path, args=job.args, env=job.env, policy=job.policy,
