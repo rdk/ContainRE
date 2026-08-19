@@ -133,3 +133,55 @@ def test_devices_are_part_of_the_reuse_container_identity(tmp_path):
     plain = _hash([])
     assert gpu != plain
     assert gpu != partial
+
+
+def test_non_string_device_entries_are_coerced_then_validated():
+    # A YAML policy can yield non-strings; they must go through the same check.
+    with pytest.raises(DockerError, match="docker_devices"):
+        _rt()._device_args(_dev_policy([123]))
+
+
+def test_duplicate_devices_are_passed_through_verbatim():
+    # Docker tolerates a repeated --device; silently de-duplicating would hide a
+    # policy mistake rather than surface it.
+    with pytest.warns(DevicePassthroughWarning):
+        args = _rt()._device_args(_dev_policy(["/dev/nvidia0", "/dev/nvidia0"]))
+    assert args == ["--device", "/dev/nvidia0", "--device", "/dev/nvidia0"]
+
+
+def test_devices_appear_in_both_fresh_and_reuse_launch_paths(monkeypatch, tmp_path):
+    # The two docker command builders are separate code paths; a device set that
+    # reached only one of them would work in tests and fail in production.
+    from containre.interfaces import Job
+
+    seen = []
+
+    def _fake_ctl(argv, **kw):
+        seen.append(list(argv))
+        class R:
+            returncode = 0
+            stdout = "true containre.config-hash"
+            stderr = ""
+        return R()
+
+    rt = _rt()
+    monkeypatch.setattr(rt, "_run_ctl", _fake_ctl)
+    monkeypatch.setattr("containre.runtime.docker.reuse.is_busy", lambda *a, **k: False)
+    pol = {"runtime": {"docker_devices": ["/dev/nvidia0"], "docker_reuse_container": True},
+           "trace": {"tracer": "none"}, "network": {"posture": "simulate", "docker_network": "none"},
+           "files": {}, "limits": {}}
+    (tmp_path / "runs").mkdir()
+    job = Job(run_dir=tmp_path / "runs" / "r1", specimen_path="/bin/true", args=[], env={},
+              cwd=str(tmp_path), stdin_path=None, policy=pol)
+    with pytest.warns(DevicePassthroughWarning):
+        rt._ensure_reuse_container(job, tmp_path, tmp_path, "containre-reuse-x", "hash")
+    run_cmds = [c for c in seen if c[:3] == ["docker", "run", "-d"]]
+    assert run_cmds, seen
+    assert "--device" in run_cmds[0] and "/dev/nvidia0" in run_cmds[0]
+
+
+def test_local_runtime_ignores_device_policy():
+    # docker_* fields are Docker-only by name; LocalRuntime must not choke on one.
+    from containre.runtime.local import LocalRuntime
+
+    assert not hasattr(LocalRuntime(), "_device_args")
