@@ -143,16 +143,17 @@ def kill(runs_root: Path, container: str, run_id: str) -> bool:
 
 def reap(runs_root: Path, container: str) -> list[str]:
     """Stop every exec whose OWNER process has died (abandoned execs), returning
-    their run ids. Generic: 'abandoned' == the opaque owner pid is no longer a
-    live process. Execs with no recorded owner are left alone."""
+    only the ids confirmed stopped. Failed kills and pending execs retain their
+    tracking for retry. Generic: 'abandoned' == the opaque owner pid is no longer
+    a live process. Execs with no recorded owner are left alone."""
     killed: list[str] = []
     for run_dir, _marker in list(_iter_runs(runs_root, container)):
         owner = read_owner(run_dir)
         if owner is None or owner_alive(*owner):
             continue
         pgid = read_pgid(run_dir)
-        if pgid is not None:
-            _kill_pgid(container, pgid)
+        if pgid is None or not _kill_pgid(container, pgid):
+            continue
         clear(run_dir)
         killed.append(run_dir.name)
     return killed

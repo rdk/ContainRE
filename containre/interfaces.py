@@ -52,6 +52,9 @@ class RunHandle:
     runtime: str
     pid: int | None = None
     container: str | None = None
+    # Container ownership is a property of the run, independent of its live
+    # marker. It must survive wait()/stop() and cleanup by an external reaper.
+    reuse_exec: bool = False
 
 
 @runtime_checkable

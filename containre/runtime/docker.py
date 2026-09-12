@@ -262,6 +262,11 @@ class DockerRuntime:
             "supervised": self._reuse_supervised(job.policy),
             "trace": job.policy.get("trace", {}).get("tracer", "ptrace"),
         }
+        if self._reuse_supervised(job.policy):
+            # Hash the same effective entrypoint/environment/labels used to
+            # create the services, so new supervisor settings cannot be omitted
+            # from the identity. Per-exec specimen env and timeouts stay out.
+            payload["supervisor_spec"] = self._supervised_spec(job)
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()[:24]
 
@@ -373,9 +378,10 @@ class DockerRuntime:
         service_env = runtime_cfg.get("supervisor_env") or {}
         net = job.policy.get("network", {})
         control_env = {
-            "CONTAINRE_SINK_CONFIG": json.dumps(net.get("sink") or {}),
+            "CONTAINRE_SINK_CONFIG": json.dumps(net.get("sink") or {}, sort_keys=True),
             "CONTAINRE_SINK_MITM": "1" if net.get("mitm") else "0",
-            "CONTAINRE_SETUP_COMMANDS": json.dumps(runtime_cfg.get("setup_commands") or []),
+            "CONTAINRE_SETUP_COMMANDS": json.dumps(runtime_cfg.get("setup_commands") or [],
+                                                  sort_keys=True),
             "CONTAINRE_CA_PATH": runtime_cfg.get("ca_path") or "/work/.containre-ca.pem",
             "CONTAINRE_READY_MARKER": "/work/.containre-ready",
             "CONTAINRE_COMMAND_SHELL": str(runtime_cfg.get("command_shell") or "/bin/sh"),
@@ -383,7 +389,7 @@ class DockerRuntime:
         if runtime_cfg.get("ready_probe"):
             control_env["CONTAINRE_READY_PROBE"] = str(runtime_cfg["ready_probe"])
         env_args: list[str] = []
-        for key, value in {**service_env, **control_env}.items():
+        for key, value in sorted({**service_env, **control_env}.items()):
             env_args += ["-e", f"{key}={value}"]
         entry = ["python3", "-m", "containre.runtime.supervisor"]
         labels = ["--label", f"{_REUSE_SUPERVISED_LABEL}=1"]
@@ -496,7 +502,8 @@ class DockerRuntime:
         with open(run_dir / "runner.log", "wb") as runner_log:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=runner_log)
         self._procs[str(run_dir)] = proc
-        return RunHandle(run_dir=run_dir, runtime=self.name, container=name, pid=proc.pid)
+        return RunHandle(run_dir=run_dir, runtime=self.name, container=name, pid=proc.pid,
+                         reuse_exec=True)
 
     def start(self, job: Job) -> RunHandle:
         self.ensure_image()
@@ -595,7 +602,10 @@ class DockerRuntime:
         while time.monotonic() < deadline:
             rc = proc.poll()
             if rc is not None:                       # exec returned normally
-                reuse.clear(handle.run_dir)
+                # The host exec exiting does not prove its workload group is
+                # gone (e.g. a disconnected Docker client or surviving children).
+                # Keep failed cleanup tracked just as on the timeout path.
+                self.stop(handle)
                 self._procs.pop(str(handle.run_dir), None)  # don't leak in a long-lived runtime
                 return rc
             if self._run_meta(handle.run_dir).get("status") in ("finished", "killed", "error"):
@@ -612,7 +622,13 @@ class DockerRuntime:
         return None
 
     def _is_reuse_exec(self, handle: RunHandle) -> bool:
-        return (Path(handle.run_dir) / reuse.MARKER_FILE).exists()
+        if not handle.reuse_exec:
+            # Compatibility for handles constructed from a live run by callers
+            # predating reuse_exec. Cache before clearing the marker so repeated
+            # stop(), or stop() racing wait(), can never kill the shared container.
+            if (Path(handle.run_dir) / reuse.MARKER_FILE).exists():
+                handle.reuse_exec = True
+        return handle.reuse_exec
 
     def stop(self, handle: RunHandle) -> None:
         # A reuse-container exec is stopped PER-EXEC: kill only this run's process
@@ -620,10 +636,13 @@ class DockerRuntime:
         # which would take down live peers. A fresh (non-reuse) run is killed
         # wholesale, as before.
         if handle.container and self._is_reuse_exec(handle):
+            if not (Path(handle.run_dir) / reuse.MARKER_FILE).exists():
+                return  # already cleared; do not signal an old, possibly reused pgid
             pgid = reuse.read_pgid(handle.run_dir)
-            if pgid is not None:
-                reuse._kill_pgid(handle.container, pgid)
-            reuse.clear(handle.run_dir)
+            # No pgid can mean the runner is still starting. Failed/unknown
+            # termination must retain both marker and owner for a later retry.
+            if pgid is not None and reuse._kill_pgid(handle.container, pgid):
+                reuse.clear(handle.run_dir)
             return
         # `docker kill` the container - for a sandbox, reliably STOPPING the
         # specimen is the safety-critical property. Terminating only the local

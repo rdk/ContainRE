@@ -16,14 +16,14 @@ def _rt():
 
 
 def test_stop_kills_the_container_to_actually_stop_the_specimen(monkeypatch):
-    # For both per-run and shared reuse containers, stop() must docker-kill the
-    # container: reliably stopping the specimen is the safety-critical property.
-    for name in ("containre-r2", "containre-reuse-default"):
-        calls = []
-        monkeypatch.setattr("containre.runtime.docker.subprocess.run",
-                            lambda *a, **k: calls.append(a[0]))
-        _rt().stop(RunHandle(run_dir=Path("/runs/x"), runtime="docker", container=name, pid=1))
-        assert calls and list(calls[0][:3]) == ["docker", "kill", name]
+    # A dedicated per-run container is stopped wholesale. Shared containers use
+    # per-exec cancellation instead (covered in test_units_reuse.py).
+    name = "containre-r2"
+    calls = []
+    monkeypatch.setattr("containre.runtime.docker.subprocess.run",
+                        lambda *a, **k: calls.append(a[0]))
+    _rt().stop(RunHandle(run_dir=Path("/runs/x"), runtime="docker", container=name, pid=1))
+    assert calls and list(calls[0][:3]) == ["docker", "kill", name]
 
 
 def test_deny_without_allowlist_is_fully_detached():

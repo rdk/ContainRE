@@ -11,12 +11,15 @@ import json
 import os
 import subprocess
 import time
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
+from containre.interfaces import Job
 from containre.runtime import DockerRuntime, docker_available
 from containre.runtime import reuse
+from containre.runtime.docker import DockerError
 
 pytestmark = [pytest.mark.docker, pytest.mark.specimen]
 
@@ -91,6 +94,96 @@ def test_reuse_kill_stops_one_exec_peer_untouched(tmp_path):
         _run(["docker", "rm", "-f", container], check=False)
 
 
+def test_runtime_repeated_stop_and_wait_leave_peer_alive(tmp_path):
+    runs_root = tmp_path / "runs"
+    work = tmp_path / "work"
+    work.mkdir()
+    key = f"test-runtime-stop-{os.getpid()}"
+    container = f"containre-reuse-{key}"
+    rt = DockerRuntime()
+    handles = []
+    policy = {
+        "specimen": {"container_path": "/bin/sh"},
+        "trace": {"tracer": "none"},
+        "network": {"posture": "deny", "docker_network": "none"},
+        "limits": {"wallclock_s": 60},
+        "runtime": {"docker_reuse_container": True, "docker_reuse_key": key},
+    }
+    try:
+        for run_id in ("peer", "target"):
+            handle = rt.start(Job(
+                run_dir=_mk(runs_root, run_id), specimen_path="/bin/sh",
+                args=["-c", "sleep 600"], env={"PATH": "/usr/bin:/bin"},
+                cwd=str(work), policy=deepcopy(policy),
+            ))
+            handles.append(handle)
+            assert handle.reuse_exec
+        peer, target = handles
+        peer_pgid = _wait_pgid(runs_root, "peer")
+        target_pgid = _wait_pgid(runs_root, "target")
+
+        rt.stop(target)
+        rt.stop(target)
+        assert rt.wait(target, timeout=10) is not None
+        rt.stop(target)  # a late cancellation after the wait also stays per-exec
+
+        assert not reuse._pgid_alive(container, target_pgid)
+        assert reuse._pgid_alive(container, peer_pgid)
+        assert {e["run_id"] for e in reuse.list_live(runs_root, container)} == {"peer"}
+        assert not (target.run_dir / reuse.MARKER_FILE).exists()
+    finally:
+        # Removing the test's container also terminates workloads if an assertion
+        # above failed, and wait reaps the local Docker client processes.
+        _run(["docker", "rm", "-f", container], check=False)
+        for handle in handles:
+            rt.wait(handle, timeout=10)
+
+
+def test_service_config_change_refuses_busy_then_recreates_when_idle(tmp_path):
+    runs_root = tmp_path / "runs"
+    work = tmp_path / "work"
+    work.mkdir()
+    run_dir = _mk(runs_root, "busy")
+    container = f"containre-test-config-{os.getpid()}"
+    rt = DockerRuntime()
+    before = Job(run_dir=run_dir, specimen_path="/bin/true", cwd=str(work), policy={
+        "trace": {"tracer": "none"},
+        "network": {"posture": "simulate", "docker_network": "none",
+                    "sink": {"listen_port": 0}},
+        "runtime": {
+            "docker_reuse_container": True, "docker_reuse_supervised": True,
+            "supervisor_env": {"SERVICE_MODE": "first"},
+            "setup_commands": ['printf "%s" "$SERVICE_MODE" > /work/service-mode'],
+            "ready_probe": "test -s /work/service-mode", "ready_timeout_s": 20,
+        },
+    })
+    after = deepcopy(before)
+    after.policy["runtime"]["supervisor_env"]["SERVICE_MODE"] = "second"
+
+    def ensure(job):
+        config_hash = rt._reuse_config_hash(job, work, work)
+        rt._ensure_reuse_container(job, work, work, container, config_hash)
+        rt._wait_supervised_ready(work, job.policy, poll_s=0.1)
+
+    try:
+        ensure(before)
+        assert (work / "service-mode").read_text() == "first"
+        reuse.mark(run_dir, container)
+        _launch_fake_workload(container, runs_root, "busy")
+        pgid = _wait_pgid(runs_root, "busy")
+
+        with pytest.raises(DockerError, match="live exec"):
+            ensure(after)
+        assert reuse._pgid_alive(container, pgid)
+        assert (work / "service-mode").read_text() == "first"
+
+        assert reuse.kill(runs_root, container, "busy")
+        ensure(after)
+        assert (work / "service-mode").read_text() == "second"
+    finally:
+        _run(["docker", "rm", "-f", container], check=False)
+
+
 def test_reap_kills_exec_with_dead_owner(tmp_path):
     """reuse.reap stops an exec whose owner process has died; an exec with a live
     owner is left running."""
@@ -100,11 +193,15 @@ def test_reap_kills_exec_with_dead_owner(tmp_path):
     _start_container(container, runs_root)
     try:
         # 'live' owned by this (alive) test process; 'orph' by a dead pid.
-        _mk(runs_root, "live"); reuse.mark(runs_root / "live", container)
+        _mk(runs_root, "live")
+        reuse.mark(runs_root / "live", container)
         reuse.mark_owner(runs_root / "live", os.getpid(), reuse.proc_start_token(os.getpid()))
         _launch_fake_workload(container, runs_root, "live")
-        dead = subprocess.Popen(["sleep", "0.05"]); dpid = dead.pid; dead.wait()
-        _mk(runs_root, "orph"); reuse.mark(runs_root / "orph", container)
+        dead = subprocess.Popen(["sleep", "0.05"])
+        dpid = dead.pid
+        dead.wait()
+        _mk(runs_root, "orph")
+        reuse.mark(runs_root / "orph", container)
         reuse.mark_owner(runs_root / "orph", dpid, "99")
         _launch_fake_workload(container, runs_root, "orph")
         live_pgid = _wait_pgid(runs_root, "live")
