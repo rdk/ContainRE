@@ -57,12 +57,28 @@ Constraints:
 - `trace.tracer` must be `none`;
 - stdin is not supported in reuse mode; pass files through the work directory;
 - use a stable `files.work_mount` if you want reuse across multiple runs;
-- Docker network/mount/limit changes recreate the keyed container;
-- stopping a run `docker kill`s the keyed container so the specimen is reliably
-  stopped. **Do not run multiple runs on the same `docker_reuse_key`
-  concurrently:** stopping (or the wallclock-timeout of) one tears down the
-  shared container and therefore every other run sharing that key. Use distinct
-  keys for runs you want to stop independently.
+- Docker network, mount, device, user, and resource-ceiling changes recreate the
+  keyed container once idle. A changed configuration is refused while runs are
+  live; drain the container before retrying. Per-run wallclock limits do not
+  require recreation;
+- stopping a run targets only its workload process group. Repeated cancellation,
+  including after `wait()`, leaves the shared container and peer runs alive;
+- failed stops retain the run's marker and owner for retry. An exec with no
+  recorded process group yet also keeps its tracking. `reuse reap` reports only
+  runs whose process group was confirmed stopped.
+
+To share helper services across concurrent runs, set
+`runtime.docker_reuse_supervised: true` and `runtime.workload_only: true`. The
+supervisor starts the sink and `setup_commands` once; workload execs skip their
+own setup and teardown. Configure service environment through
+`runtime.supervisor_env`, independently of the specimen environment.
+
+The supervisor environment, setup commands, readiness probe, command shell, CA
+path, sink configuration, and MITM setting are all part of the container's
+creation identity. Changing any of them requires an idle container before it can
+be recreated with the new services. Mapping key order does not affect identity;
+setup command order does. Upgrading from an older version that omitted these
+settings from the identity also requires draining existing supervised containers.
 
 The reusable container is named `containre-reuse-<docker_reuse_key>`. Remove it
 manually when finished:
