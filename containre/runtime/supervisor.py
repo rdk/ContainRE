@@ -9,9 +9,9 @@ keeps a readiness marker present so the in-container runner fails closed if the
 services are down.
 
 This module is domain-agnostic: the hosted services are whatever the policy's
-``network.sink`` + ``runtime.setup_commands`` describe (a caller running a
-application backend, say, passes its job-server start there; ContainRE neither knows nor
-cares). Everything is driven by environment variables passed at ``docker run`` by
+``network.sink`` + ``runtime.setup_commands`` describe. A caller can start a
+worker service there without adding application-specific behavior to ContainRE.
+Everything is driven by environment variables passed at ``docker run`` by
 ``DockerRuntime._supervised_spec``:
 
   CONTAINRE_SINK_CONFIG     JSON of the policy network.sink block (has listen_port)

@@ -402,8 +402,8 @@ class DockerRuntime:
         sets; an unset limit means *no* cap, so the sandbox uses host resources
         by default rather than being silently throttled. This matters for
         heavyweight nested tooling: a low default ``pids`` (formerly 128) or
-        ``nofile`` (formerly 1024) is enough to DEADLOCK e.g. a application job
-        server under concurrency — a fork/thread it needs to release a lock
+        ``nofile`` (formerly 1024) is enough to DEADLOCK a worker service
+        under concurrency — a fork/thread it needs to release a lock
         fails, and everything parks on a futex at 0% CPU.
 
         Security note: a policy sandboxing an UNTRUSTED specimen should set
@@ -431,8 +431,8 @@ class DockerRuntime:
     def _wait_supervised_ready(self, work_dir: Path, policy: dict, *, poll_s: float = 1.0) -> None:
         """Block until the supervised container publishes /work/.containre-ready
         (host path work_dir/.containre-ready) — i.e. the supervisor's sink +
-        setup services are up. Cold start (first exec) waits out the suite/job-
-        server startup; a warm container returns at once. Raises if it never
+        setup services are up. Cold start (first exec) waits for service startup;
+        a warm container returns at once. Raises if it never
         readies (an unhealthy container the caller should replace)."""
         timeout_s = float(policy.get("runtime", {}).get("ready_timeout_s") or 600.0)
         marker = Path(work_dir) / ".containre-ready"
