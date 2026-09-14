@@ -151,6 +151,7 @@ def get_runtime(name: str) -> Runtime:
 def execute(policy: dict, runs_root: Path | None = None, runtime: Runtime | None = None,
             timeout: float | None = None) -> RunResult:
     from ..runtime.local import LocalRuntime
+    from ..runtime.cgroup import ResourceSampler, evaluate as evaluate_resources
 
     runs_root = runs_root or default_runs_root()
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -163,7 +164,15 @@ def execute(policy: dict, runs_root: Path | None = None, runtime: Runtime | None
 
     handle = runtime.start(job)
     grace = timeout if timeout is not None else (policy.get("limits", {}).get("wallclock_s", 120) + 30)
-    wait_result = runtime.wait(handle, timeout=grace)
+    # A ceiling is only a safety feature if something checks whether it was
+    # hit. The container's cgroup disappears with the container (--rm), so
+    # sample it while the run is alive. Inert for runtimes without a container.
+    reuse_exec = getattr(handle, "reuse_exec", False)
+    sampler = ResourceSampler(getattr(handle, "container", None), reuse_exec=reuse_exec).start()
+    try:
+        wait_result = runtime.wait(handle, timeout=grace)
+    finally:
+        resources = sampler.stop()
     error = None
     if wait_result is None:
         meta = json.loads((run_dir / "meta.json").read_text())
@@ -182,6 +191,32 @@ def execute(policy: dict, runs_root: Path | None = None, runtime: Runtime | None
                 stopped_wall=wall_ns(),
                 kill_reason=None,
                 error=error,
+            )
+
+    # Record what the kernel actually did to this run, and fail the run when a
+    # ceiling named in kill_on was breached. Without this a throttled run is
+    # indistinguishable from a clean one: the workload reports its casualties
+    # as ordinary errors and the result looks plausible.
+    breaches = evaluate_resources(resources) if resources else []
+    # Shared counters cannot establish per-job blame. Keep observations advisory.
+    fatal = [b for b in breaches if b["trigger"] in set(policy.get("kill_on", []))
+             and not reuse_exec]
+    if resources or breaches:
+        with RunStore(run_dir) as st:
+            st.update_meta(resources=resources, resource_breaches=breaches,
+                           fatal_resource_breaches=fatal)
+    if fatal:
+        detail = "; ".join(b["detail"] for b in fatal)
+        # Keep what already went wrong. A run frequently times out *because* it
+        # was starved, and overwriting the original error throws away the more
+        # useful half of that story.
+        meta = json.loads((run_dir / "meta.json").read_text())
+        prior_error = meta.get("error")
+        with RunStore(run_dir) as st:
+            st.update_meta(
+                status="error",
+                kill_reason=meta.get("kill_reason") or fatal[0]["trigger"],
+                error=f"{prior_error}; {detail}" if prior_error else detail,
             )
 
     meta = json.loads((run_dir / "meta.json").read_text())

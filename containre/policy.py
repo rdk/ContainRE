@@ -20,7 +20,8 @@ DEFAULTS: dict = {
     # safety timer) and disk_mb (tracer disk guard) are defaulted. A policy
     # sandboxing an UNTRUSTED specimen should set explicit cpu/mem_mb/pids to
     # bound fork bombs, memory bombs, and CPU abuse (see DockerRuntime.
-    # _resource_limit_args); note kill_on:[oom] is a no-op unless mem_mb is set.
+    # _resource_limit_args). kill_on:[oom] needs mem_mb set to have a ceiling
+    # to breach, and kill_on:[pids_exceeded] likewise needs pids.
     "limits": {"wallclock_s": 120, "disk_mb": 256},
     "network": {
         "posture": "simulate",
@@ -69,7 +70,12 @@ DEFAULTS: dict = {
     # (egress_violation, decoy_write) abort the recording on the first blocked
     # egress / decoy touch, so they are opt-in - a flight recorder blocks egress
     # by default and keeps observing. timeout is always enforced regardless.
-    "kill_on": ["oom", "timeout"],
+    # oom and pids_exceeded are checked against the container's cgroup
+    # counters after dedicated-container runs (shared observations are advisory;
+    # see control.orchestrator.execute and
+    # runtime.cgroup); both are on by default because a breached ceiling
+    # silently corrupts results rather than announcing itself.
+    "kill_on": ["oom", "pids_exceeded", "timeout"],
 }
 
 

@@ -4,13 +4,17 @@
 #
 # Build (from repo root):
 #   docker build -t containre/runner:0.1 -f images/Dockerfile.runner .
-FROM ubuntu:24.04
+# Override when mounting libraries from a newer host, e.g. --build-arg UBUNTU_VERSION=26.04.
+ARG UBUNTU_VERSION=24.04
+FROM ubuntu:${UBUNTU_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip ca-certificates libssl3 \
+    && apt-get install -y --no-install-recommends build-essential python3-dev \
     && pip3 install --no-cache-dir --break-system-packages \
         python-ptrace pyyaml jsonschema typer capstone unicorn yara-python cryptography \
+    && apt-get purge -y --auto-remove build-essential python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY containre/ /opt/containre/containre/

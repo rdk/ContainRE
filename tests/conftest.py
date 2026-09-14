@@ -30,6 +30,7 @@ _EXTRA_FLAGS = {
 # Link libraries (appended after the source, where the linker wants them).
 _EXTRA_LIBS = {
     "httpsbeacon": ["-lssl", "-lcrypto"],
+    "forkwall": ["-lpthread"],
 }
 
 
