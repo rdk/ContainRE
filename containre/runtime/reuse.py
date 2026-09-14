@@ -21,6 +21,7 @@ ContainRE only provides the mechanism, never the policy.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -174,11 +175,13 @@ def stop_if_idle(runs_root: Path, container: str, *, idle_s: float = 0.0,
         if (time.time() if now is None else now) - last < idle_s:
             return False
     try:
-        subprocess.run(["docker", "stop", container],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=_EXEC_TIMEOUT_S + 15.0)  # docker stop has its own ~10s grace
-    except subprocess.TimeoutExpired:
+        proc = subprocess.run(["docker", "stop", container],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=_EXEC_TIMEOUT_S + 15.0)  # stop has its own ~10s grace
+    except (subprocess.TimeoutExpired, OSError):
         return False  # daemon wedged; leave the activity stamp so we retry later
+    if proc.returncode != 0:
+        return False
     _activity_path(runs_root, container).unlink(missing_ok=True)
     return True
 
@@ -188,8 +191,8 @@ def stop_if_idle(runs_root: Path, container: str, *, idle_s: float = 0.0,
 #: `docker exec`/`stop` control ops are bounded — under a wedged/overloaded
 #: docker daemon (or a hung in-container probe) an unbounded call would hang the
 #: liveness/kill/idle paths (and the wedged-exec recovery in DockerRuntime.wait,
-#: which routes through stop()->_kill_pgid->_exec). Distinct from a fast non-zero
-#: exit (container gone): a TIMEOUT means "can't tell", handled conservatively.
+#: which routes through stop()->_kill_pgid->_exec). A failed control command
+#: does not establish that a container is gone.
 _EXEC_TIMEOUT_S = 30.0
 _EXEC_TIMEDOUT = object()  # sentinel: docker exec did not return in time
 
@@ -200,7 +203,41 @@ def _exec(container: str, argv: list[str], *, timeout: float = _EXEC_TIMEOUT_S):
                               capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return _EXEC_TIMEDOUT
+    except OSError:
+        return None
     return proc.stdout if proc.returncode == 0 else None
+
+
+def _container_stopped(container: str) -> bool:
+    """Confirm absence/stopped state; any Docker or parsing error stays unknown.
+
+    A failed inspect/exec can mean a daemon failure or a missing container. A
+    successful, exactly filtered listing distinguishes confirmed absence without
+    parsing localized error messages or treating a permission failure as absence.
+    """
+    selector = (
+        f"id={container}" if re.fullmatch(r"[0-9a-f]{64}", container)
+        else f"name=^/{re.escape(container.removeprefix('/'))}$"
+    )
+    try:
+        proc = subprocess.run(
+            ["docker", "container", "ls", "--all", "--no-trunc", "--filter", selector,
+             "--format", "{{.ID}} {{.State}}"],
+            capture_output=True, text=True, timeout=_EXEC_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if proc.returncode != 0:
+        return False
+    lines = proc.stdout.strip().splitlines()
+    if not lines:
+        return True
+    fields = lines[0].split()
+    return (
+        len(lines) == 1 and len(fields) == 2
+        and re.fullmatch(r"[0-9a-f]{64}", fields[0]) is not None
+        and fields[1] in {"exited", "dead"}
+    )
 
 
 def _pgid_alive(container: str, pgid: int) -> bool:
@@ -221,10 +258,9 @@ def _pgid_alive(container: str, pgid: int) -> bool:
         # Probe wedged (daemon hung): assume ALIVE so the busy-guard/idle-reaper
         # never replace or stop a container whose liveness we couldn't read.
         return True
-    try:
-        return int((out or "0").strip()) > 0
-    except ValueError:
-        return False
+    if isinstance(out, str) and re.fullmatch(r"[0-9]{1,10}", out.strip()):
+        return int(out.strip()) > 0
+    return not _container_stopped(container)
 
 
 def _kill_pgid(container: str, pgid: int, *, grace_s: float = 5.0) -> bool:
@@ -232,8 +268,8 @@ def _kill_pgid(container: str, pgid: int, *, grace_s: float = 5.0) -> bool:
     if pgid <= 1:
         return False
     _exec(container, ["sh", "-c", f"kill -TERM -{pgid} 2>/dev/null || true"])
-    deadline = time.time() + grace_s
-    while time.time() < deadline:
+    deadline = time.monotonic() + grace_s
+    while time.monotonic() < deadline:
         if not _pgid_alive(container, pgid):
             return True
         time.sleep(0.25)

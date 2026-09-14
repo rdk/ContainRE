@@ -93,6 +93,12 @@ Open `http://127.0.0.1:8787`.
 | Emulate a code region | `uv run containre run specimens/bin/l2demo --l2 unicorn --l2-region 0x401000:0x401028` |
 | Use the safer backend for an untrusted binary | `uv run containre run /path/to/specimen --runtime docker --net deny --timeout 120` |
 
+Reuse liveness treats failed, timed-out or malformed Docker probes as unknown and
+busy. Only an explicit zero process count or a successful container listing that
+confirms absence/stopped state permits cleanup. Failed idle-stop commands return
+false and retain the activity stamp for retry. These control operations have
+bounded timeouts; they do not interpret a daemon error as successful termination.
+
 The default `local` runtime is useful for tests and trusted specimens. Use
 `--runtime docker` for untrusted binaries.
 
