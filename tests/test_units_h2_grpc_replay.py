@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 import yaml
@@ -145,7 +146,10 @@ def test_cli_infer_h2_grpc_replay_no_trace_requires_endpoint(tmp_path):
     result = runner.invoke(app, ["infer-h2-grpc-replay", str(capture), "--no-trace"])
 
     assert result.exit_code != 0
-    assert "--no-trace requires --service-host and --service-port" in result.output
+    # Typer renders usage errors through rich: colour codes and a panel wrapped at the
+    # terminal width (80 columns on CI), so compare the plain, whitespace-collapsed text.
+    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
+    assert "--no-trace requires --service-host and --service-port" in plain
 
 
 def test_infer_tolerates_malformed_and_binary_capture(tmp_path):
