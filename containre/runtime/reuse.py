@@ -29,9 +29,6 @@ from pathlib import Path
 PGID_FILE = "leader.pgid"
 MARKER_FILE = "reuse_container"  # per-run marker: the container this exec runs in
 OWNER_FILE = "owner"             # "<pid> <start_token>": the host process that owns this exec
-#: A just-launched exec may not have written its pgid yet; treat a recently
-#: marked run with no pgid as live so the busy-guard doesn't race a cold start.
-PENDING_GRACE_S = 180.0
 
 
 def _activity_path(runs_root: Path, container: str) -> Path:
@@ -93,9 +90,17 @@ def proc_start_token(pid: int) -> str | None:
 def owner_alive(pid: int, start_token: str | None) -> bool:
     if pid <= 0:
         return False
-    current = proc_start_token(pid)
-    if current is None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True  # unreadable process state does not establish abandonment
+    rparen = stat.rfind(")")
+    rest = stat[rparen + 2:].split() if rparen != -1 else []
+    if len(rest) < 20:
+        return True
+    current = rest[19]
     return not (start_token and current != start_token)
 
 
@@ -117,17 +122,16 @@ def _iter_runs(runs_root: Path, container: str):
 
 def list_live(runs_root: Path, container: str, *, now: float | None = None) -> list[dict]:
     """Runs on `container` whose workload is still alive. A run is live while its
-    leader process group survives in the container, or (cold-start window) while
-    its marker is fresh and no pgid is recorded yet. Self-cleaning: no separate
+    leader process group survives in the container, or while its marker has no
+    pgid yet. Age cannot prove that a delayed launch will never run. Self-cleaning: no separate
     registry to leak; a finished exec drops its own marker."""
-    now = time.time() if now is None else now
     live: list[dict] = []
     for run_dir, marker in _iter_runs(runs_root, container):
         pgid = read_pgid(run_dir)
         if pgid is not None:
             if _pgid_alive(container, pgid):
                 live.append({"run_id": run_dir.name, "run_dir": str(run_dir), "pgid": pgid})
-        elif now - marker.stat().st_mtime < PENDING_GRACE_S:  # cold-start window
+        else:  # incomplete launch requires reconciliation, regardless of age
             live.append({"run_id": run_dir.name, "run_dir": str(run_dir), "pgid": None})
     return live
 
@@ -138,7 +142,13 @@ def is_busy(runs_root: Path, container: str) -> bool:
 
 def kill(runs_root: Path, container: str, run_id: str) -> bool:
     """Stop one exec's process group inside `container`. Idempotent."""
-    pgid = read_pgid(Path(runs_root) / run_id)
+    run_dir = Path(runs_root) / run_id
+    try:
+        if (run_dir / MARKER_FILE).read_text().strip() != container:
+            return False
+    except OSError:
+        return False
+    pgid = read_pgid(run_dir)
     return _kill_pgid(container, pgid) if pgid is not None else False
 
 

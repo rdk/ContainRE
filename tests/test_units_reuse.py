@@ -49,8 +49,8 @@ def test_list_live_pending_window(tmp_path, monkeypatch):
     monkeypatch.setattr(reuse, "_pgid_alive", lambda c, p: False)
     # Fresh marker -> counted live (cold start).
     assert reuse.is_busy(tmp_path, C) is True
-    # Past the grace window -> no longer live.
-    assert reuse.list_live(tmp_path, C, now=1e18) == []
+    # Age is not evidence of termination: a delayed launch can still run.
+    assert reuse.list_live(tmp_path, C, now=1e18)
 
 
 def test_clear_marker_drops_liveness(tmp_path, monkeypatch):
