@@ -80,7 +80,7 @@ def test_reap_stops_only_dead_owner_execs(tmp_path, monkeypatch):
     reuse.mark_owner(orph_dir, 200, "t")
     monkeypatch.setattr(reuse, "owner_alive", lambda pid, tok: pid == 100)
     killed = []
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda c, p, **k: killed.append((c, p)) or True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda d, c, **k: killed.append((c, reuse.read_pgid(d))) or True)
 
     assert reuse.reap(tmp_path, C) == ["orph"]
     assert killed == [(C, 2)]                       # only the dead-owner exec
@@ -94,7 +94,7 @@ def test_reap_retains_failed_kill_for_retry(tmp_path, monkeypatch):
     reuse.mark_owner(run_dir, 200, "start")
     monkeypatch.setattr(reuse, "owner_alive", lambda *a: False)
     monkeypatch.setattr(reuse, "_pgid_alive", lambda *a: True)
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: False)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: False)
 
     assert reuse.reap(tmp_path, container) == []
     assert (run_dir / reuse.MARKER_FILE).exists()
@@ -102,7 +102,7 @@ def test_reap_retains_failed_kill_for_retry(tmp_path, monkeypatch):
     assert reuse.is_busy(tmp_path, container)
     assert not reuse.stop_if_idle(tmp_path, container)
 
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: True)
     assert reuse.reap(tmp_path, container) == ["orphan"]
     assert not (run_dir / reuse.MARKER_FILE).exists()
     assert reuse.read_owner(run_dir) is None
@@ -114,7 +114,7 @@ def test_reap_retains_pending_exec_until_pgid_is_available(tmp_path, monkeypatch
     reuse.mark_owner(run_dir, 200, "start")
     monkeypatch.setattr(reuse, "owner_alive", lambda *a: False)
     killed = []
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda c, p: killed.append((c, p)) or True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda d, c: (killed.append((c, reuse.read_pgid(d))) or True) if reuse.read_pgid(d) else False)
 
     assert reuse.reap(tmp_path, "c1") == []
     assert killed == []
@@ -134,7 +134,7 @@ def test_repeated_stop_never_kills_shared_container(tmp_path, monkeypatch, expli
     handle = RunHandle(run_dir=run_dir, runtime="docker", container="c1",
                        reuse_exec=explicit_mode)
     killed = []
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda c, p: killed.append((c, p)) or True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda d, c: (killed.append((c, reuse.read_pgid(d))) or True) if reuse.read_pgid(d) else False)
     monkeypatch.setattr(dockermod.subprocess, "run",
                         lambda *a, **k: pytest.fail(f"unexpected container control: {a[0]}"))
     rt = DockerRuntime()
@@ -149,7 +149,7 @@ def test_stop_after_external_cleanup_is_noop(tmp_path, monkeypatch):
     run_dir = _run_with_marker(tmp_path, "target", "c1", pgid=4242)
     handle = RunHandle(run_dir=run_dir, runtime="docker", container="c1", reuse_exec=True)
     reuse.clear(run_dir)  # e.g. an external reaper, before this runtime's first stop
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: pytest.fail("stale pgid signalled"))
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: pytest.fail("stale pgid signalled"))
     monkeypatch.setattr(dockermod.subprocess, "run",
                         lambda *a, **k: pytest.fail("shared container killed"))
     DockerRuntime().stop(handle)
@@ -170,7 +170,7 @@ def test_legacy_handle_reuse_identity_cannot_be_reset_by_racing_stop(tmp_path, m
         return original_exists(path)
 
     monkeypatch.setattr(Path, "exists", exists_after_other_stop)
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: True)
     monkeypatch.setattr(dockermod.subprocess, "run",
                         lambda *a, **k: pytest.fail("shared container killed"))
     rt.stop(handle)
@@ -183,7 +183,7 @@ def test_stop_retains_tracking_until_confirmed_killed(tmp_path, monkeypatch, pen
     reuse.mark_owner(run_dir, 200, "start")
     handle = RunHandle(run_dir=run_dir, runtime="docker", container="c1", reuse_exec=True)
     monkeypatch.setattr(reuse, "_pgid_alive", lambda *a: True)
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: False)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: False)
     monkeypatch.setattr(dockermod.subprocess, "run",
                         lambda *a, **k: pytest.fail("shared container killed"))
     rt = DockerRuntime()
@@ -193,7 +193,7 @@ def test_stop_retains_tracking_until_confirmed_killed(tmp_path, monkeypatch, pen
     assert reuse.is_busy(tmp_path, "c1")
 
     (run_dir / reuse.PGID_FILE).write_text("4242")
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: True)
     rt.stop(handle)
     assert not (run_dir / reuse.MARKER_FILE).exists()
     assert reuse.read_owner(run_dir) is None
@@ -341,7 +341,7 @@ def test_wait_reuse_exec_short_circuits_on_terminal_meta(tmp_path, monkeypatch):
     rt = DockerRuntime()
     rt._REUSE_WAIT_POLL_S = 0.01
     handle = _reuse_handle(tmp_path, status="finished", exit_code=0)
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: True)
     proc = _FakeProc(poll_rc=None)
     rt._procs[str(handle.run_dir)] = proc
     assert rt.wait(handle, timeout=5.0) == 0
@@ -353,7 +353,7 @@ def test_wait_reuse_exec_returns_proc_rc_when_exec_exits(tmp_path, monkeypatch):
     # Normal case: the exec returns -> use its rc, don't consult meta.
     rt = DockerRuntime()
     handle = _reuse_handle(tmp_path, status=None)
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: True)
     rt._procs[str(handle.run_dir)] = _FakeProc(poll_rc=7)
     assert rt.wait(handle, timeout=5.0) == 7
     assert not (handle.run_dir / reuse.MARKER_FILE).exists()
@@ -365,7 +365,7 @@ def test_wait_reuse_exec_times_out_when_meta_never_terminal(tmp_path, monkeypatc
     rt = DockerRuntime()
     rt._REUSE_WAIT_POLL_S = 0.01
     handle = _reuse_handle(tmp_path, status="running")
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: True)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: True)
     proc = _FakeProc(poll_rc=None)
     rt._procs[str(handle.run_dir)] = proc
     assert rt.wait(handle, timeout=0.2) is None
@@ -383,7 +383,7 @@ def test_stop_after_wait_never_kills_peers_or_forgets_failed_cleanup(
                            exit_code=0)
     reuse.mark_owner(handle.run_dir, 200, "start")
     rt._procs[str(handle.run_dir)] = _FakeProc(poll_rc=0 if finish == "normal" else None)
-    monkeypatch.setattr(reuse, "_kill_pgid", lambda *a: kill_succeeds)
+    monkeypatch.setattr(reuse, "_stop_run", lambda *a: kill_succeeds)
     monkeypatch.setattr(dockermod.subprocess, "run",
                         lambda *a, **k: pytest.fail("shared container killed"))
 

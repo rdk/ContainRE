@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ..control.instrumentation import configure_tls_plaintext
 from ..interfaces import Job, RunHandle
-from . import reuse
+from . import execution, reuse
 
 
 class HostNetworkingWarning(UserWarning):
@@ -428,7 +428,8 @@ class DockerRuntime:
             args += ["--ulimit", f"nofile={int(nofile)}:{int(nofile)}"]
         return args
 
-    def _wait_supervised_ready(self, work_dir: Path, policy: dict, *, poll_s: float = 1.0) -> None:
+    def _wait_supervised_ready(self, work_dir: Path, policy: dict, *, poll_s: float = 1.0,
+                               generation: str | None = None) -> None:
         """Block until the supervised container publishes /work/.containre-ready
         (host path work_dir/.containre-ready) — i.e. the supervisor's sink +
         setup services are up. Cold start (first exec) waits out the suite/job-
@@ -438,8 +439,11 @@ class DockerRuntime:
         marker = Path(work_dir) / ".containre-ready"
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if marker.exists():
-                return
+            try:
+                if marker.exists() and (generation is None or marker.read_text().strip() == generation):
+                    return
+            except OSError:
+                pass
             time.sleep(poll_s)
         raise DockerError(
             f"supervised reuse container not ready within {timeout_s:g}s "
@@ -472,7 +476,16 @@ class DockerRuntime:
 
         name = self._reuse_container_name(job.policy)
         config_hash = self._reuse_config_hash(job, specimen_parent, workdir)
-        self._ensure_reuse_container(job, specimen_parent, workdir, name, config_hash)
+        with reuse.lifecycle(name):
+            self._ensure_reuse_container(job, specimen_parent, workdir, name, config_hash)
+            identity = reuse.container_identity(name)
+            with execution.locked(run_dir):
+                if (run_dir / execution.RECORD).exists():
+                    previous = execution.read(run_dir)
+                    if previous["phase"] != "reserved":
+                        raise DockerError("reuse execution already launched or cancelled")
+                execution.write(run_dir, {"version": 1, "phase": "pending", **identity})
+                reuse.mark(run_dir, name)
 
         if self._reuse_supervised(job.policy):
             # The supervisor stands up the sink + setup services (e.g. the job
@@ -480,14 +493,14 @@ class DockerRuntime:
             # its readiness marker before launching the workload, or the exec
             # would fail closed against not-yet-ready services. A warm container
             # already has the marker, so later execs return immediately.
-            self._wait_supervised_ready(workdir, job.policy)
+            self._wait_supervised_ready(
+                workdir, job.policy, generation=f"{identity['boot_id']}:{identity['init_start']}")
 
         # Mark this run as belonging to the reuse container so `reuse.list_live`
         # (the busy-guard + the external reaper) can see it. The in-container
         # runner writes leader.pgid into the run dir; together they let ContainRE
         # tell whether the container is still busy, and let an external
         # orchestrator kill this one exec without touching the container.
-        reuse.mark(run_dir, name)
         owner_pid = job.policy.get("runtime", {}).get("owner_pid")
         if owner_pid:
             # Opaque owner: if this host process dies, `reuse reap` reclaims the
@@ -496,7 +509,8 @@ class DockerRuntime:
                              job.policy.get("runtime", {}).get("owner_token"))
 
         cmd = [
-            "docker", "exec", *self._docker_user_args(job.policy), "-w", container_workdir, name,
+            "docker", "exec", *self._docker_user_args(job.policy), "-w", container_workdir,
+            identity["container_id"],
             "python3", "-m", "containre.tracer.runner", f"{container_run_dir}/cjob.json",
         ]
         with open(run_dir / "runner.log", "wb") as runner_log:
@@ -638,10 +652,9 @@ class DockerRuntime:
         if handle.container and self._is_reuse_exec(handle):
             if not (Path(handle.run_dir) / reuse.MARKER_FILE).exists():
                 return  # already cleared; do not signal an old, possibly reused pgid
-            pgid = reuse.read_pgid(handle.run_dir)
             # No pgid can mean the runner is still starting. Failed/unknown
             # termination must retain both marker and owner for a later retry.
-            if pgid is not None and reuse._kill_pgid(handle.container, pgid):
+            if reuse.kill(handle.run_dir.parent, handle.container, handle.run_dir.name):
                 reuse.clear(handle.run_dir)
             return
         # `docker kill` the container - for a sandbox, reliably STOPPING the

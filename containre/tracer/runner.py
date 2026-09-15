@@ -13,12 +13,14 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 
 from ..interfaces import Job
 from ..model import Event, Kind, wall_ns
 from ..net import BuiltinSink, MitmCA
+from ..runtime import execution
 from .ptrace_tracer import PtraceTracer
 from .session import RunSession
 
@@ -118,6 +120,8 @@ def _run_runtime_commands(job: Job, session: RunSession, phase: str) -> tuple[in
 
 
 def _run_without_tracer(job: Job, console_path: str, on_start=None) -> tuple[int | None, str | None]:
+    if job.policy.get("runtime", {}).get("docker_reuse_container"):
+        return _run_reused_workload(job, console_path, on_start)
     stdin_fh = open(job.stdin_path, "rb") if job.stdin_path else None
     timeout = float(job.policy.get("limits", {}).get("wallclock_s", 120))
     try:
@@ -147,6 +151,63 @@ def _run_without_tracer(job: Job, console_path: str, on_start=None) -> tuple[int
     finally:
         if stdin_fh is not None:
             stdin_fh.close()
+
+
+def _run_reused_workload(job: Job, console_path: str, on_start=None):
+    run_dir = Path(job.run_dir)
+    with open(console_path, "wb") as console:
+        with execution.locked(run_dir):
+            record = execution.read(run_dir)
+            if record["phase"] == "stopped":
+                return -signal.SIGTERM, "manual"
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            if (record["phase"] != "pending" or record["boot_id"] != boot_id
+                    or record["init_start"] != execution.start_token(1)):
+                raise RuntimeError("reuse execution generation changed before launch")
+            ready_generation = f"{boot_id}:{record['init_start']}"
+            if _workload_only(job) and Path("/work/.containre-ready").read_text().strip() != ready_generation:
+                raise RuntimeError("supervised services are not ready for this generation")
+            try:
+                execution.require_group_signals()
+            except (OSError, AttributeError) as exc:
+                raise RuntimeError("shared execution requires pidfd process-group signals (Linux 6.9+)") from exc
+            record["phase"] = "launching"
+            execution.write(run_dir, record)
+            proc = subprocess.Popen(
+                [job.specimen_path, *job.args], cwd=job.cwd, env=job.env,
+                stdout=console, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+            try:
+                record.update(phase="running", pgid=proc.pid,
+                              leader_start=execution.start_token(proc.pid))
+                execution.write(run_dir, record)
+                if on_start is not None:
+                    on_start(proc.pid)
+            except BaseException:
+                # Our direct child has not been waited on: its group number
+                # cannot be reused while this parent kills the failed launch.
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                raise
+        timeout = float(job.policy.get("limits", {}).get("wallclock_s", 120))
+        deadline = time.monotonic() + timeout
+        timed_out = False
+        while os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            time.sleep(0.05)
+        # Keep the exited leader unreaped until its children are drained. Its
+        # pidfd then still identifies the original group, even after leader exit.
+        gone = execution.control(record, stop=True) == "gone"
+        if not gone:
+            raise RuntimeError("reuse workload cleanup remains unconfirmed")
+        rc = proc.wait(timeout=5)
+        with execution.locked(run_dir):
+            current = execution.read(run_dir)
+            current["phase"] = "stopped"
+            execution.write(run_dir, current)
+        return rc, "timeout" if timed_out else None
 
 
 def _workload_only(job: Job) -> bool:

@@ -79,6 +79,7 @@ def run(
     l2_region: str = typer.Option(None, "--l2-region", help="unicorn: region to emulate, 'START:END' (hex addrs)."),
     runs_root: Path = typer.Option(None, "--runs-root", help="Where run directories are written."),
     as_json: bool = typer.Option(False, "--json", help="Emit the run summary as JSON."),
+    run_id: str = typer.Option(None, "--run-id", help="Preallocated unique execution ID; never reused."),
 ) -> None:
     """Execute a specimen under the harness and record a run."""
     target_path = Path(target)
@@ -128,7 +129,7 @@ def run(
         raise typer.BadParameter("invalid effective policy:\n  " + "\n  ".join(errors))
 
     result = execute(policy, runs_root=runs_root or default_runs_root(),
-                     runtime=get_runtime(runtime))
+                     runtime=get_runtime(runtime), run_id=run_id)
     meta = result.meta
     verdict = meta.get("verdict", {})
     if as_json:
@@ -546,13 +547,21 @@ def reuse_kill(
     key: str = typer.Argument(..., help="The reuse key."),
     run_id: str = typer.Argument(..., help="The run whose exec to stop."),
     runs_root: Path = typer.Option(None, "--runs-root"),
+    reserve_cancel: bool = typer.Option(False, "--reserve-cancel", help="Fence an unstarted preallocated ID."),
+    as_json: bool = typer.Option(False, "--json"),
 ) -> None:
     """Stop ONE exec's process group inside the reuse container (peers and the
     container keep running). Used by an external orchestrator to reap an
     abandoned exec — ContainRE provides the mechanism, not the abandon policy."""
     from ..runtime import reuse
-    ok = reuse.kill(runs_root or default_runs_root(), f"containre-reuse-{key}", run_id)
-    _echo(f"kill {run_id}: {'stopped' if ok else 'no live process group found'}")
+    ok = reuse.kill(runs_root or default_runs_root(), f"containre-reuse-{key}", run_id,
+                    reserve_cancel=reserve_cancel)
+    if as_json:
+        typer.echo(json.dumps({"run_id": run_id, "stopped": ok}))
+    else:
+        _echo(f"kill {run_id}: {'stopped' if ok else 'cleanup unconfirmed'}")
+    if not ok:
+        raise typer.Exit(1)
 
 
 @reuse_app.command("reap")

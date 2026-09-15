@@ -92,7 +92,7 @@ class RunResult:
         return [e for e in self.events() if e["kind"] == "detection"]
 
 
-def create_run(policy: dict, runs_root: Path) -> tuple[Path, Job]:
+def create_run(policy: dict, runs_root: Path, *, run_id: str | None = None) -> tuple[Path, Job]:
     spec = policy["specimen"]
     specimen = Path(spec["path"]).resolve()
     if not specimen.exists():
@@ -100,9 +100,22 @@ def create_run(policy: dict, runs_root: Path) -> tuple[Path, Job]:
     raw = specimen.read_bytes()
     sha256 = hashlib.sha256(raw).hexdigest()
 
-    run_id = make_run_id(specimen, sha256)
+    from ..runtime import execution
+    run_id = run_id or make_run_id(specimen, sha256)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", run_id):
+        raise ValueError("invalid run id")
     run_dir = runs_root / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    with execution.locked(run_dir):
+        # Exclusive creation also honours a cancellation tombstone written
+        # before this CLI started. Retrying a known ID must never redock it.
+        run_dir.mkdir(parents=True, exist_ok=False)
+        cfg = policy.get("runtime", {})
+        if cfg.get("docker_reuse_container"):
+            from ..runtime.docker import DockerRuntime
+            execution.write(run_dir, {
+                "version": 1, "phase": "reserved",
+                "container_name": DockerRuntime()._reuse_container_name(policy),
+            })
 
     (run_dir / "policy.yaml").write_text(yaml.safe_dump(policy, sort_keys=False))
 
@@ -149,7 +162,7 @@ def get_runtime(name: str) -> Runtime:
 
 
 def execute(policy: dict, runs_root: Path | None = None, runtime: Runtime | None = None,
-            timeout: float | None = None) -> RunResult:
+            timeout: float | None = None, *, run_id: str | None = None) -> RunResult:
     from ..runtime.local import LocalRuntime
     from ..runtime.cgroup import ResourceSampler, evaluate as evaluate_resources
 
@@ -157,7 +170,7 @@ def execute(policy: dict, runs_root: Path | None = None, runtime: Runtime | None
     runs_root.mkdir(parents=True, exist_ok=True)
     runtime = runtime or LocalRuntime()
 
-    run_dir, job = create_run(policy, runs_root)
+    run_dir, job = create_run(policy, runs_root, run_id=run_id)
     store = RunStore(run_dir)
     store.update_meta(runtime=runtime.name, image=getattr(runtime, "image", None))
     store.close()

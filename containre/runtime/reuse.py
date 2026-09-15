@@ -21,14 +21,95 @@ ContainRE only provides the mechanism, never the policy.
 """
 from __future__ import annotations
 
+import fcntl
+import json
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
+
+from . import execution
 
 PGID_FILE = "leader.pgid"
 MARKER_FILE = "reuse_container"  # per-run marker: the container this exec runs in
 OWNER_FILE = "owner"             # "<pid> <start_token>": the host process that owns this exec
+
+
+@contextmanager
+def lifecycle(container: str):
+    """Serialize managed creation, launch registration and retirement by name."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", container):
+        raise ValueError("invalid container name")
+    root = Path.home() / ".cache" / "containre" / "reuse-locks"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (root / container).open("a") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def container_identity(container: str) -> dict:
+    proc = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .}}", container],
+        capture_output=True, text=True, timeout=_EXEC_TIMEOUT_S,
+    )
+    if proc.returncode:
+        raise RuntimeError("cannot inspect reuse container identity")
+    value = json.loads(proc.stdout)
+    if not value["State"]["Running"]:
+        raise RuntimeError("reuse container is not running")
+    return {
+        "container_id": value["Id"], "container_name": container,
+        "image_id": value["Image"], "started_at": value["State"]["StartedAt"],
+        "init_start": execution.start_token(int(value["State"]["Pid"])),
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    }
+
+
+def _execution_status(record: dict, *, stop: bool = False) -> str:
+    if record["phase"] == "stopped":
+        return "gone"
+    if record["phase"] not in {"running", "launching"}:
+        return "unknown"
+    container_id = record["container_id"]
+    out = _exec(container_id, [
+        "python3", "-m", "containre.runtime.execution", json.dumps(record),
+        "stop" if stop else "probe",
+    ])
+    if isinstance(out, str) and out.strip() in {"alive", "gone", "unknown"}:
+        return out.strip()
+    return "gone" if _container_stopped(container_id) else "unknown"
+
+
+def _stop_run(run_dir: Path, container: str, *, reserve_cancel: bool = False) -> bool:
+    """Fence an unstarted launch, or stop its exact recorded execution.
+
+    reserve_cancel is used with a caller's preallocated unique run ID. Creating
+    a cancelled directory fences a CLI which has not yet created that run.
+    An existing legacy/invalid record is always retained for explicit recovery.
+    """
+    with execution.locked(run_dir):
+        if reserve_cancel and not run_dir.exists():
+            run_dir.mkdir()
+            execution.write(run_dir, {"version": 1, "phase": "stopped",
+                                      "container_name": container})
+            return True
+        try:
+            record = execution.read(run_dir)
+            if record["container_name"] != container:
+                return False
+            if record["phase"] in {"reserved", "pending"}:
+                record["phase"] = "stopped"
+            elif _execution_status(record, stop=True) != "gone":
+                return False
+            record["phase"] = "stopped"
+            execution.write(run_dir, record)
+            return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
 
 
 def _activity_path(runs_root: Path, container: str) -> Path:
@@ -128,6 +209,14 @@ def list_live(runs_root: Path, container: str, *, now: float | None = None) -> l
     live: list[dict] = []
     for run_dir, marker in _iter_runs(runs_root, container):
         pgid = read_pgid(run_dir)
+        if (run_dir / execution.RECORD).exists():
+            try:
+                if _execution_status(execution.read(run_dir)) == "gone":
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            live.append({"run_id": run_dir.name, "run_dir": str(run_dir), "pgid": pgid})
+            continue
         if pgid is not None:
             if _pgid_alive(container, pgid):
                 live.append({"run_id": run_dir.name, "run_dir": str(run_dir), "pgid": pgid})
@@ -140,16 +229,19 @@ def is_busy(runs_root: Path, container: str) -> bool:
     return bool(list_live(runs_root, container))
 
 
-def kill(runs_root: Path, container: str, run_id: str) -> bool:
+def kill(runs_root: Path, container: str, run_id: str, *, reserve_cancel: bool = False) -> bool:
     """Stop one exec's process group inside `container`. Idempotent."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", run_id):
+        raise ValueError("invalid run id")
     run_dir = Path(runs_root) / run_id
+    if reserve_cancel:
+        return _stop_run(run_dir, container, reserve_cancel=True)
     try:
         if (run_dir / MARKER_FILE).read_text().strip() != container:
             return False
     except OSError:
         return False
-    pgid = read_pgid(run_dir)
-    return _kill_pgid(container, pgid) if pgid is not None else False
+    return _stop_run(run_dir, container)
 
 
 def reap(runs_root: Path, container: str) -> list[str]:
@@ -162,8 +254,7 @@ def reap(runs_root: Path, container: str) -> list[str]:
         owner = read_owner(run_dir)
         if owner is None or owner_alive(*owner):
             continue
-        pgid = read_pgid(run_dir)
-        if pgid is None or not _kill_pgid(container, pgid):
+        if not _stop_run(run_dir, container):
             continue
         clear(run_dir)
         killed.append(run_dir.name)
@@ -175,6 +266,12 @@ def stop_if_idle(runs_root: Path, container: str, *, idle_s: float = 0.0,
     """Stop `container` iff it has no live execs AND its last activity is at least
     `idle_s` ago (a grace so it stays warm between campaign waves). Returns True
     if stopped."""
+    with lifecycle(container):
+        return _stop_if_idle_locked(runs_root, container, idle_s=idle_s, now=now)
+
+
+def _stop_if_idle_locked(runs_root: Path, container: str, *, idle_s: float,
+                         now: float | None) -> bool:
     if is_busy(runs_root, container):
         return False
     if idle_s > 0:

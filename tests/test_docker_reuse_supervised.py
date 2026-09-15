@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -18,7 +19,7 @@ import pytest
 
 from containre.interfaces import Job
 from containre.runtime import DockerRuntime, docker_available
-from containre.runtime import reuse
+from containre.runtime import execution, reuse
 from containre.runtime.docker import DockerError
 
 pytestmark = [pytest.mark.docker, pytest.mark.specimen]
@@ -55,6 +56,15 @@ def _launch_fake_workload(container: str, runs_root: Path, run_id: str) -> None:
         "f.write(str(p.pid));f.flush();os.fsync(f.fileno());f.close()"
     )
     _run(["docker", "exec", "-d", container, "python3", "-c", py])
+    pgid = _wait_pgid(runs_root, run_id)
+    token = _run(["docker", "exec", container, "python3", "-c",
+                  f"from containre.runtime.execution import start_token; print(start_token({pgid}))"])
+    run_dir = runs_root / run_id
+    with execution.locked(run_dir):
+        execution.write(run_dir, {
+            "version": 1, "phase": "running", **reuse.container_identity(container),
+            "pgid": pgid, "leader_start": token.stdout.strip(),
+        })
 
 
 def _wait_pgid(runs_root: Path, run_id: str) -> int:
@@ -68,7 +78,9 @@ def _wait_pgid(runs_root: Path, run_id: str) -> int:
 
 def _start_container(name: str, runs_root: Path) -> None:
     _run(["docker", "run", "-d", "--name", name,
-          "-v", f"{runs_root}:/runs", IMAGE, "sleep", "infinity"])
+          "-v", f"{runs_root}:/runs",
+          "-v", f"{REPO / 'containre'}:/opt/containre/containre:ro",
+          IMAGE, "sleep", "infinity"])
 
 
 def test_reuse_kill_stops_one_exec_peer_untouched(tmp_path):
@@ -91,6 +103,86 @@ def test_reuse_kill_stops_one_exec_peer_untouched(tmp_path):
         assert reuse._pgid_alive(container, live_pgid)       # peer survives
         assert {e["run_id"] for e in reuse.list_live(runs_root, container)} == {"live"}
     finally:
+        _run(["docker", "rm", "-f", container], check=False)
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_old_container_generation_cannot_signal_new_peer(tmp_path, replace):
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
+    container = f"containre-test-generation-{os.getpid()}"
+    _start_container(container, runs_root)
+    try:
+        _mk(runs_root, "old")
+        reuse.mark(runs_root / "old", container)
+        _launch_fake_workload(container, runs_root, "old")
+        old = execution.read(runs_root / "old")
+        if replace:
+            _run(["docker", "rm", "-f", container])
+            _start_container(container, runs_root)
+        else:
+            _run(["docker", "restart", "-t", "0", container])
+        _mk(runs_root, "peer")
+        reuse.mark(runs_root / "peer", container)
+        _launch_fake_workload(container, runs_root, "peer")
+        peer = execution.read(runs_root / "peer")
+        # Deliberately collide the numeric process identity. The container's
+        # immutable ID/start generation must reject this stale control first.
+        old.update(pgid=peer["pgid"], leader_start=peer["leader_start"])
+        with execution.locked(runs_root / "old"):
+            execution.write(runs_root / "old", old)
+        assert reuse.kill(runs_root, container, "old")
+        assert reuse._pgid_alive(container, peer["pgid"])
+        assert execution.read(runs_root / "old")["container_id"] == old["container_id"]
+    finally:
+        _run(["docker", "rm", "-f", container], check=False)
+
+
+def test_cancel_pending_exec_prevents_delayed_workload_launch(tmp_path, monkeypatch):
+    runs_root = tmp_path / "runs"
+    work = tmp_path / "work"
+    work.mkdir()
+    key = f"test-delayed-launch-{os.getpid()}"
+    container = f"containre-reuse-{key}"
+    rt = DockerRuntime()
+    job = Job(run_dir=_mk(runs_root, "pending"), specimen_path="/bin/sh",
+              args=["-c", "touch /work/should-not-run"], env={"PATH": "/usr/bin:/bin"},
+              cwd=str(work), policy={
+                  "specimen": {"container_path": "/bin/sh"}, "trace": {"tracer": "none"},
+                  "network": {"posture": "deny", "docker_network": "none"},
+                  "runtime": {"docker_reuse_container": True, "docker_reuse_key": key},
+              })
+    entered, proceed = threading.Event(), threading.Event()
+    original = subprocess.Popen
+    outcome = []
+
+    def delayed(cmd, *a, **kw):
+        if "containre.tracer.runner" in cmd:
+            entered.set()
+            assert proceed.wait(10)
+        return original(cmd, *a, **kw)
+
+    def start():
+        try:
+            outcome.append(rt.start(job))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    monkeypatch.setattr(subprocess, "Popen", delayed)
+    thread = threading.Thread(target=start)
+    thread.start()
+    try:
+        assert entered.wait(10)
+        assert reuse.kill(runs_root, container, "pending")
+        proceed.set()
+        thread.join(10)
+        assert len(outcome) == 1 and not isinstance(outcome[0], BaseException), outcome
+        rt.wait(outcome[0], timeout=10)
+        assert not (work / "should-not-run").exists()
+        assert execution.read(job.run_dir)["phase"] == "stopped"
+    finally:
+        proceed.set()
+        thread.join(10)
         _run(["docker", "rm", "-f", container], check=False)
 
 

@@ -64,8 +64,39 @@ Constraints:
 - stopping a run targets only its workload process group. Repeated cancellation,
   including after `wait()`, leaves the shared container and peer runs alive;
 - failed stops retain the run's marker and owner for retry. An exec with no
-  recorded process group yet also keeps its tracking. `reuse reap` reports only
-  runs whose process group was confirmed stopped.
+  recorded process group never expires out of tracking. `reuse reap` reports only
+  confirmed cleanup or a launch that was durably cancelled before it started;
+- reuse execution requires Linux pidfd process-group signalling (Linux 6.9 or
+  later), checked inside the container before launching the workload. Standard
+  Python wrappers or the system libc wrappers are supported. This is a kernel
+  capability, separate from the package's Python minimum. See
+  [pidfd_send_signal(2)](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html).
+
+Each new reuse run retains `execution.json`: actual image ID, immutable container
+ID, container start/host boot identity, process-group leader start token and
+launch/cleanup phase. Control checks this identity inside the recorded container
+and signals through a pidfd, so a stale name or process number cannot target a
+later execution. The runner keeps an exited leader unreaped until its remaining
+group members are stopped. If the runner and leader both disappear while children
+survive and identity is no longer provable, cleanup stays unconfirmed. Application
+work handed to a pre-existing service is outside this group; its caller must also
+confirm scoped service cleanup before releasing application capacity.
+
+An orchestrator can reserve a unique ID before starting the CLI:
+
+```bash
+containre run policy.yaml --runtime docker --runs-root /node/runs --run-id UNIQUE_ID --json
+containre reuse kill batch-screen UNIQUE_ID --runs-root /node/runs --reserve-cancel --json
+```
+
+The cancellation command fences even a CLI that has not created its run yet.
+An existing ID is never launched again. Keep run directories, cancellation
+tombstones and `.execution-locks` until all possible callers have stopped retrying.
+Use `--reserve-cancel` only with IDs allocated by that orchestrator. Invalid or
+legacy execution records are retained; drain old containers before upgrading.
+The readiness marker now identifies the supervisor's boot/start generation, so
+the same drain is required for old warm supervisors. Managed creation, launch
+registration and idle retirement share a per-user container lifecycle lock.
 
 To share helper services across concurrent runs, set
 `runtime.docker_reuse_supervised: true` and `runtime.workload_only: true`. The

@@ -128,7 +128,9 @@ class Supervisor:
 
     # -- readiness ----------------------------------------------------------
     def _mark_ready(self) -> None:
-        _atomic_write(self.marker, str(int(time.time())).encode())
+        from .execution import start_token
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        _atomic_write(self.marker, f"{boot_id}:{start_token(1)}".encode())
 
     def _mark_unready(self) -> None:
         self.marker.unlink(missing_ok=True)
