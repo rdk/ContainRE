@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 from containre.interfaces import Job, RunHandle
 from containre.runtime import docker as dockermod
 from containre.runtime import reuse
