@@ -397,3 +397,101 @@ def test_h2_grpc_replay_rejects_oversized_frame():
 
     assert seen and seen[0]["op"] == "h2-grpc-replay"
     assert seen[0].get("note") == "frame exceeds advertised max frame size"
+
+
+def test_stop_drains_handler_during_startup_handoff(monkeypatch):
+    import threading
+
+    allow_register = threading.Event()
+    allow_callback = threading.Event()
+    handler_started = threading.Event()
+    stopped = threading.Event()
+    seen = []
+    sink = BuiltinSink(on_interaction=lambda info: seen.append(stopped.is_set()))
+    original_start = threading.Thread.start
+    original_respond = sink._respond
+
+    def gated_start(thread):
+        original_start(thread)
+        if getattr(thread, "_target", None) == sink._handle:
+            handler_started.set()
+            assert allow_register.wait(5)
+
+    def gated_respond(conn, data):
+        info = original_respond(conn, data)
+        assert allow_callback.wait(5)
+        return info
+
+    def stop():
+        sink.stop()
+        stopped.set()
+
+    monkeypatch.setattr(threading.Thread, "start", gated_start)
+    monkeypatch.setattr(sink, "_respond", gated_respond)
+    sink.start()
+    stopper = threading.Thread(target=stop)
+    try:
+        with socket.create_connection(("127.0.0.1", sink.port), timeout=2) as client:
+            client.sendall(b"GET /handoff HTTP/1.0\r\nHost: local\r\n\r\n")
+            assert b"200 OK" in client.recv(4096)
+        assert handler_started.wait(2)
+        stopper.start()
+        assert sink._stop.wait(2)
+        assert not stopped.wait(0.05), "shutdown missed the starting handler"
+        allow_register.set()
+        assert not stopped.wait(0.05), "shutdown missed the pending callback"
+        allow_callback.set()
+        assert stopped.wait(2)
+        assert seen == [False], "callback must precede shutdown return"
+        assert not any(t.is_alive() for t in sink._accept_threads + sink._handlers)
+    finally:
+        allow_register.set()
+        allow_callback.set()
+        sink.stop()
+        if stopper.ident is not None:
+            stopper.join(2)
+
+
+def test_stop_uses_one_deadline_and_reports_incomplete_drain(caplog):
+    import threading
+
+    release = threading.Event()
+    sink = BuiltinSink()
+    sink._handlers = [threading.Thread(target=release.wait) for _ in range(4)]
+    for thread in sink._handlers:
+        thread.start()
+    try:
+        start = time.monotonic()
+        sink.stop(drain_timeout=0.1)
+        assert time.monotonic() - start < 0.35
+        assert "sink shutdown incomplete: 4 thread(s) still running" in caplog.text
+    finally:
+        release.set()
+        sink.stop()
+
+
+def test_failed_handler_start_closes_connection_and_keeps_accepting(monkeypatch):
+    import threading
+
+    sink = BuiltinSink()
+    original_start = threading.Thread.start
+    failed = threading.Event()
+
+    def fail_once(thread):
+        if getattr(thread, "_target", None) == sink._handle and not failed.is_set():
+            failed.set()
+            raise RuntimeError("thread limit")
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_once)
+    sink.start()
+    try:
+        with socket.create_connection(("127.0.0.1", sink.port), timeout=2) as client:
+            assert failed.wait(2)
+            assert client.recv(1) == b""
+        assert sink._handlers == []
+        with socket.create_connection(("127.0.0.1", sink.port), timeout=2) as client:
+            client.sendall(b"GET /retry HTTP/1.0\r\n\r\n")
+            assert b"200 OK" in client.recv(4096)
+    finally:
+        sink.stop()

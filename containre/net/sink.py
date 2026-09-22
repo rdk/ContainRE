@@ -10,6 +10,7 @@ InetSimSink adapter can implement the same NetSink interface later.
 from __future__ import annotations
 
 import errno
+import logging
 import socket
 import ssl
 import threading
@@ -122,12 +123,12 @@ class BuiltinSink:
         except OSError:
             pass
         for srv in self._servers:
+            srv.settimeout(0.3)
             t = threading.Thread(target=self._accept_loop, args=(srv,), daemon=True)
             t.start()
             self._accept_threads.append(t)
 
     def _accept_loop(self, srv: socket.socket) -> None:
-        srv.settimeout(0.3)
         while not self._stop.is_set():
             try:
                 conn, _ = srv.accept()
@@ -144,16 +145,17 @@ class BuiltinSink:
                 self._stop.wait(0.05)
                 continue
             h = threading.Thread(target=self._handle, args=(conn,), daemon=True)
-            # Start the handler BEFORE registering it: if start() fails (e.g. the
-            # container hit its --pids-limit), close the accepted conn and keep
-            # serving instead of leaving an unstarted thread in _handlers (which
-            # would make stop()'s join raise) and leaking the fd.
-            try:
-                h.start()
-            except RuntimeError:
-                self._close(conn)
-                continue
             with self._lock:
+                # Shutdown snapshots this same critical section. A handler must
+                # either be started and registered together, or never start.
+                if self._stop.is_set():
+                    self._close(conn)
+                    break
+                try:
+                    h.start()
+                except RuntimeError:
+                    self._close(conn)
+                    continue  # pids-limit: no unstarted handler or leaked fd
                 self._handlers = [t for t in self._handlers if t.is_alive()]  # prune finished
                 self._handlers.append(h)
 
@@ -653,6 +655,7 @@ class BuiltinSink:
         return info
 
     def stop(self, drain_timeout: float = 3.0) -> None:
+        deadline = time.monotonic() + max(0.0, drain_timeout)
         self._stop.set()
         for srv in self._servers:
             try:
@@ -663,8 +666,13 @@ class BuiltinSink:
         # caller finalizes the run (otherwise a late detection races store.close()).
         with self._lock:
             handlers = list(self._handlers)
-        for h in handlers:
+        threads = [*self._accept_threads, *handlers]
+        for h in threads:
             try:
-                h.join(timeout=drain_timeout)
+                h.join(timeout=max(0.0, deadline - time.monotonic()))
             except RuntimeError:
-                continue  # never-started thread; nothing to join
+                continue  # unstarted thread or this callback's own thread
+        pending = sum(h.is_alive() for h in threads)
+        if pending:
+            logging.getLogger(__name__).warning(
+                "sink shutdown incomplete: %d thread(s) still running", pending)
