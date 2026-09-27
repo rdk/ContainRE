@@ -394,6 +394,17 @@
           "type": ["string", "null"],
           "description": "Optional shell command the supervisor must see exit 0 (in addition to the sink + setup_commands) before marking the container ready."
         },
+        "ready_timeout_s": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0,
+          "description": "DockerRuntime-only. Upper bound in seconds on waiting for a supervised reuse container to become ready (default 600). A container that stops before it is ready fails the run at once, with its exit code and log tail, without waiting this out."
+        },
+        "ready_diagnostics": {
+          "type": "array",
+          "description": "DockerRuntime-only. Container paths under /work (for example a setup command's redirected log) whose tails are quoted in the error when a supervised reuse container dies or never becomes ready. Read through the /work bind mount; ContainRE does not interpret them.",
+          "items": { "type": "string", "pattern": "^/work/" },
+          "default": []
+        },
         "owner_pid": {
           "type": ["integer", "null"],
           "description": "Opaque owner: the host process this exec belongs to. If it dies, `containre reuse reap` reclaims the exec's process group. ContainRE does not interpret it. Only meaningful for a reuse exec."

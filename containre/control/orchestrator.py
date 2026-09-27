@@ -3,6 +3,7 @@ collect the result. Shared by the CLI and the control-plane API.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -175,8 +176,22 @@ def execute(policy: dict, runs_root: Path | None = None, runtime: Runtime | None
     store.update_meta(runtime=runtime.name, image=getattr(runtime, "image", None))
     store.close()
 
-    handle = runtime.start(job)
-    grace = timeout if timeout is not None else (policy.get("limits", {}).get("wallclock_s", 120) + 30)
+    try:
+        handle = runtime.start(job)
+    except BaseException as exc:
+        # The run never launched (e.g. a reuse container that died during
+        # bring-up). Leave a terminal record naming the cause rather than a
+        # run that reads as `queued` forever, then let the caller see the
+        # original exception.
+        with contextlib.suppress(Exception):
+            with RunStore(run_dir) as st:
+                st.update_meta(status="error", exit_code=None, stopped_wall=wall_ns(),
+                               kill_reason=None,
+                               error=f"runtime failed to start the run: {exc}"
+                               if not isinstance(exc, KeyboardInterrupt)
+                               else "interrupted before the run started")
+        raise
+    grace =timeout if timeout is not None else (policy.get("limits", {}).get("wallclock_s", 120) + 30)
     # A ceiling is only a safety feature if something checks whether it was
     # hit. The container's cgroup disappears with the container (--rm), so
     # sample it while the run is alive. Inert for runtimes without a container.

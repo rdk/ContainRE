@@ -128,8 +128,20 @@ def run(
     if errors:
         raise typer.BadParameter("invalid effective policy:\n  " + "\n  ".join(errors))
 
-    result = execute(policy, runs_root=runs_root or default_runs_root(),
-                     runtime=get_runtime(runtime), run_id=run_id)
+    try:
+        result = execute(policy, runs_root=runs_root or default_runs_root(),
+                         runtime=get_runtime(runtime), run_id=run_id)
+    except (RuntimeError, OSError) as exc:
+        # Infrastructure failure before or while launching the run (e.g. a
+        # reuse container that died during bring-up). Report it as a clean,
+        # machine-readable failure with the cause instead of a traceback.
+        message = str(exc) or type(exc).__name__
+        if as_json:
+            typer.echo(json.dumps({"run_id": run_id, "status": "error", "exit_code": None,
+                                   "error": message, "error_type": type(exc).__name__},
+                                  indent=2))
+        typer.secho(f"containre run failed: {message}", err=True, fg="red")
+        raise typer.Exit(1) from exc
     meta = result.meta
     verdict = meta.get("verdict", {})
     if as_json:

@@ -111,6 +111,24 @@ be recreated with the new services. Mapping key order does not affect identity;
 setup command order does. Upgrading from an older version that omitted these
 settings from the identity also requires draining existing supervised containers.
 
+A run waits for the supervisor's readiness marker for at most
+`runtime.ready_timeout_s` seconds (default 600). If the container stops first,
+for example because a setup command failed and the supervisor exited, the run
+fails at once instead. The error carries the container's exit code, the tail of
+its log, and the tails of any files listed in `runtime.ready_diagnostics`:
+
+```yaml
+runtime:
+  setup_commands:
+    - 'job-server start > /work/server_start.log 2>&1'
+  ready_diagnostics: [/work/server_start.log]
+```
+
+The run's `meta.json` is marked `error` with that message, and `containre run
+--json` prints it with a non-zero exit. The dead container is kept for
+inspection. The next run removes a stopped reuse container and creates a fresh
+one; it never restarts it in place.
+
 The reusable container is named `containre-reuse-<docker_reuse_key>`. Remove it
 manually when finished:
 

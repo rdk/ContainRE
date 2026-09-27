@@ -60,6 +60,22 @@ class DockerError(RuntimeError):
     pass
 
 
+class ReuseContainerDied(DockerError):
+    """A reuse container stopped before (or while) this run could use it.
+
+    Raised instead of waiting out ``ready_timeout_s`` against a container that
+    can never become ready. The message carries the container's exit code, the
+    tail of its logs and of any configured ``runtime.ready_diagnostics`` files,
+    so the operator sees the cause (e.g. a setup command that cannot start)
+    without reaching for ``docker logs``. The dead container is left in place
+    for inspection; the next run removes and recreates it."""
+
+    def __init__(self, message: str, *, container: str, exit_code: int | None):
+        super().__init__(message)
+        self.container = container
+        self.exit_code = exit_code
+
+
 def docker_available() -> bool:
     docker = shutil.which("docker")
     if not docker:
@@ -320,6 +336,18 @@ class DockerRuntime:
             exists = running = False
         if exists and running:
             return
+        if exists:
+            # A stopped reuse container is never restarted in place: it either
+            # died (a failed supervisor bring-up exits non-zero) or was retired
+            # by the idle reaper. `docker start` would replay the same failure
+            # against the same writable layer, so remove it and create a fresh
+            # one. A stopped container has no live execs, so nothing is killed.
+            proc = self._run_ctl(["docker", "rm", "-f", name], capture_output=True, text=True)
+            if proc.returncode != 0 and "no such container" not in (proc.stderr or "").lower():
+                raise DockerError(
+                    f"cannot remove stopped reuse container {name}: "
+                    f"{(proc.stderr or proc.stdout).strip()}")
+            exists = False
         # About to (re)start the container. A supervised container's readiness
         # marker lives on the host /work mount and SURVIVES docker rm -f / OOM /
         # daemon crash (the old supervisor only clears it on a graceful SIGTERM).
@@ -328,11 +356,6 @@ class DockerRuntime:
         # not-yet-ready services and silently produce a wrong result.
         if self._reuse_supervised(job.policy):
             (Path(workdir) / ".containre-ready").unlink(missing_ok=True)
-        if exists:
-            proc = self._run_ctl(["docker", "start", name], capture_output=True, text=True)
-            if proc.returncode != 0:
-                raise DockerError(f"docker start {name} failed: {proc.stderr.strip() or proc.stdout.strip()}")
-            return
 
         if supervised:
             entry, env_args, extra_labels = self._supervised_spec(job)
@@ -428,26 +451,138 @@ class DockerRuntime:
             args += ["--ulimit", f"nofile={int(nofile)}:{int(nofile)}"]
         return args
 
+    #: Lines of `docker logs` / diagnostic-file tail quoted in a dead-container error.
+    _DIAG_TAIL_LINES = 40
+    _DIAG_TAIL_BYTES = 4000
+
+    def _container_state(self, container: str) -> dict | None:
+        """The container's ``.State`` dict; ``{}`` when Docker confirms the
+        container no longer exists; ``None`` when the state cannot be read (a
+        daemon hiccup), which callers treat as unknown rather than dead."""
+        try:
+            proc = self._run_ctl(["docker", "inspect", "--format", "{{json .State}}", container],
+                                 capture_output=True, text=True)
+        except (DockerError, OSError):
+            return None
+        if proc.returncode != 0:
+            return {} if "no such" in (proc.stderr or "").lower() else None
+        try:
+            state = json.loads(proc.stdout)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    def _container_log_tail(self, container: str) -> str:
+        try:
+            proc = self._run_ctl(["docker", "logs", "--tail", str(self._DIAG_TAIL_LINES), container],
+                                 capture_output=True, text=True)
+        except (DockerError, OSError):
+            return ""
+        text = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        return text[-self._DIAG_TAIL_BYTES:]
+
+    def _diagnostic_file_tails(self, work_dir: Path, policy: dict) -> list[tuple[str, str]]:
+        """Tails of ``runtime.ready_diagnostics``: container paths under /work
+        (e.g. a setup command's redirected log) that explain a failed bring-up.
+        Read on the host through the /work bind mount; anything outside /work,
+        missing or unreadable is skipped. Generic: ContainRE does not interpret
+        the contents."""
+        out: list[tuple[str, str]] = []
+        root = Path(work_dir).resolve()
+        for entry in policy.get("runtime", {}).get("ready_diagnostics") or []:
+            entry = str(entry)
+            if entry != "/work" and not entry.startswith("/work/"):
+                continue
+            host = (root / entry[len("/work/"):]).resolve()
+            if host != root and root not in host.parents:
+                continue
+            try:
+                with host.open("rb") as fh:
+                    fh.seek(0, 2)
+                    size = fh.tell()
+                    fh.seek(max(0, size - self._DIAG_TAIL_BYTES))
+                    data = fh.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            lines = data.strip().splitlines()[-self._DIAG_TAIL_LINES:]
+            if lines:
+                out.append((entry, "\n".join(lines)))
+        return out
+
+    def _dead_container_error(self, name: str, container: str, state: dict,
+                              work_dir: Path, policy: dict, *, when: str) -> ReuseContainerDied:
+        exit_code = state.get("ExitCode") if state else None
+        if state:
+            status = state.get("Status") or "stopped"
+            head = (f"reuse container {name} {status} {when} "
+                    f"(exit code {exit_code}"
+                    + (f", finished {state['FinishedAt']}" if state.get("FinishedAt") else "")
+                    + (f", error: {state['Error']}" if state.get("Error") else "")
+                    + ")")
+        else:
+            head = f"reuse container {name} no longer exists {when}"
+        parts = [head]
+        logs = self._container_log_tail(container) if state else ""
+        if logs:
+            parts.append(f"--- container log (tail) ---\n{logs}")
+        for path, tail in self._diagnostic_file_tails(work_dir, policy):
+            parts.append(f"--- {path} (tail) ---\n{tail}")
+        parts.append("The container is left for inspection and will be recreated by the next run.")
+        return ReuseContainerDied("\n".join(parts), container=name, exit_code=exit_code)
+
+    @staticmethod
+    def _cancelled(run_dir: Path | None) -> bool:
+        if run_dir is None:
+            return False
+        try:
+            return execution.read(run_dir).get("phase") == "stopped"
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
     def _wait_supervised_ready(self, work_dir: Path, policy: dict, *, poll_s: float = 1.0,
-                               generation: str | None = None) -> None:
+                               generation: str | None = None, container: str | None = None,
+                               name: str | None = None, run_dir: Path | None = None) -> None:
         """Block until the supervised container publishes /work/.containre-ready
         (host path work_dir/.containre-ready) — i.e. the supervisor's sink +
         setup services are up. Cold start (first exec) waits out the suite/job-
-        server startup; a warm container returns at once. Raises if it never
-        readies (an unhealthy container the caller should replace)."""
+        server startup; a warm container returns at once.
+
+        Bounded three ways: ``runtime.ready_timeout_s`` (default 600 s); the
+        container itself — when ``container`` is given, a container that has
+        stopped (a supervisor whose bring-up failed exits non-zero) or vanished
+        can never publish the marker, so this raises :class:`ReuseContainerDied`
+        at once with its exit code and log tail; and cancellation — a run whose
+        execution record was fenced (``containre reuse kill``) stops waiting."""
         timeout_s = float(policy.get("runtime", {}).get("ready_timeout_s") or 600.0)
         marker = Path(work_dir) / ".containre-ready"
         deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+        label = name or container or "supervised reuse container"
+        while True:
             try:
                 if marker.exists() and (generation is None or marker.read_text().strip() == generation):
                     return
             except OSError:
                 pass
+            if container is not None:
+                state = self._container_state(container)
+                if state is not None and not state.get("Running"):
+                    raise self._dead_container_error(label, container, state, work_dir, policy,
+                                                     when="before becoming ready")
+            if self._cancelled(run_dir):
+                raise DockerError(f"run cancelled while waiting for {label} to become ready")
+            if time.monotonic() >= deadline:
+                break
             time.sleep(poll_s)
+        detail = ""
+        if container is not None:
+            logs = self._container_log_tail(container)
+            if logs:
+                detail += f"\n--- container log (tail) ---\n{logs}"
+        for path, tail in self._diagnostic_file_tails(work_dir, policy):
+            detail += f"\n--- {path} (tail) ---\n{tail}"
         raise DockerError(
-            f"supervised reuse container not ready within {timeout_s:g}s "
-            f"({marker} absent); check the container's supervisor output")
+            f"supervised reuse container {label} not ready within {timeout_s:g}s "
+            f"({marker} absent); check the container's supervisor output{detail}")
 
     def _start_reused(self, job: Job) -> RunHandle:
         if job.policy.get("trace", {}).get("tracer", "ptrace") != "none":
@@ -478,7 +613,16 @@ class DockerRuntime:
         config_hash = self._reuse_config_hash(job, specimen_parent, workdir)
         with reuse.lifecycle(name):
             self._ensure_reuse_container(job, specimen_parent, workdir, name, config_hash)
-            identity = reuse.container_identity(name)
+            try:
+                identity = reuse.container_identity(name)
+            except RuntimeError:
+                # Created (or found running) a moment ago and already stopped:
+                # report why, instead of a bare "not running".
+                state = self._container_state(name)
+                if state is not None and not state.get("Running"):
+                    raise self._dead_container_error(name, name, state, workdir, job.policy,
+                                                     when="right after start") from None
+                raise
             with execution.locked(run_dir):
                 if (run_dir / execution.RECORD).exists():
                     previous = execution.read(run_dir)
@@ -493,8 +637,16 @@ class DockerRuntime:
             # its readiness marker before launching the workload, or the exec
             # would fail closed against not-yet-ready services. A warm container
             # already has the marker, so later execs return immediately.
-            self._wait_supervised_ready(
-                workdir, job.policy, generation=f"{identity['boot_id']}:{identity['init_start']}")
+            try:
+                self._wait_supervised_ready(
+                    workdir, job.policy, generation=f"{identity['boot_id']}:{identity['init_start']}",
+                    container=identity["container_id"], name=name, run_dir=run_dir)
+            except BaseException:
+                # Nothing was launched. Retire the pending registration so this
+                # run does not count as a live exec forever (which would block
+                # replacing or idling the container) and cannot launch later.
+                self._abandon_pending(run_dir)
+                raise
 
         # Mark this run as belonging to the reuse container so `reuse.list_live`
         # (the busy-guard + the external reaper) can see it. The in-container
@@ -518,6 +670,19 @@ class DockerRuntime:
         self._procs[str(run_dir)] = proc
         return RunHandle(run_dir=run_dir, runtime=self.name, container=name, pid=proc.pid,
                          reuse_exec=True)
+
+    @staticmethod
+    def _abandon_pending(run_dir: Path) -> None:
+        """Fence a reuse run whose exec was never launched and drop its marker."""
+        try:
+            with execution.locked(run_dir):
+                record = execution.read(run_dir)
+                if record.get("phase") in {"reserved", "pending", "stopped"}:
+                    record["phase"] = "stopped"
+                    execution.write(run_dir, record)
+                    reuse.clear(run_dir)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # keep tracking; `reuse reap`/kill can still retire it
 
     def start(self, job: Job) -> RunHandle:
         self.ensure_image()
