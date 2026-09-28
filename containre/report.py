@@ -7,6 +7,7 @@ import json
 import os
 import re
 from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -97,18 +98,90 @@ def _endpoint_port(endpoint: str) -> int | None:
         return None
 
 
-def _sha256_file(path: Path, *, max_bytes: int = DEFAULT_HASH_LIMIT) -> str | None:
+def _sha256_file(
+    path: str, listed: os.stat_result, *, max_bytes: int = DEFAULT_HASH_LIMIT,
+) -> str | None:
+    """Hash the regular file the walk listed at ``path``; None if it is over
+    ``max_bytes`` or is no longer that file.
+
+    The final component is opened without following a symlink (and without
+    blocking on a FIFO), and the descriptor must be the listed inode, so a file
+    or parent directory swapped since the listing is never read.
+    """
     try:
-        size = path.stat().st_size
-        if size > max_bytes:
-            return None
-        h = hashlib.sha256()
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
+    try:
+        with open(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if (st.st_dev, st.st_ino) != (listed.st_dev, listed.st_ino) or st.st_size > max_bytes:
+                return None
+            return hashlib.file_digest(fh, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
+def _list_dir(
+    path: str, identity: tuple[int, int] | None,
+) -> list[tuple[str, os.stat_result, bool]]:
+    """``(name, lstat, is_dir)`` for the regular files and real subdirectories of
+    ``path``, sorted by name. Symlinks and special files are left out, and an
+    unreadable or vanished directory lists as empty.
+
+    ``identity`` is the ``(st_dev, st_ino)`` the directory had when its parent
+    was listed. The opened directory must still be that inode, so one swapped
+    mid-walk (for a symlink, or by moving a parent) is skipped, not listed.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return []
+    rows = []
+    try:
+        if identity is not None:
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) != identity:
+                return []
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    if is_dir or entry.is_file(follow_symlinks=False):
+                        rows.append((entry.name, entry.stat(follow_symlinks=False), is_dir))
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    finally:
+        os.close(fd)
+    rows.sort(key=lambda row: row[0])
+    return rows
+
+
+def _walk_files(
+    root: str, identity: tuple[int, int] | None,
+) -> Iterator[tuple[str, str, os.stat_result]]:
+    """``(relative path, path, lstat)`` for every regular file under ``root``.
+
+    Pre-order with siblings by name, so each directory's subtree comes before
+    its next sibling: the order ``sorted(Path(root).rglob("*"))`` gives.
+    Iterative, so a deep tree cannot exhaust the recursion limit.
+    """
+    stack = [("", root, iter(_list_dir(root, identity)))]
+    while stack:
+        rel_dir, dir_path, rows = stack[-1]
+        row = next(rows, None)
+        if row is None:
+            stack.pop()
+            continue
+        name, st, is_dir = row
+        path = os.path.join(dir_path, name)
+        if is_dir:
+            rows = iter(_list_dir(path, (st.st_dev, st.st_ino)))
+            stack.append((f"{rel_dir}{name}/", path, rows))
+        else:
+            yield f"{rel_dir}{name}", path, st
 
 
 def _file_inventory(
@@ -117,47 +190,40 @@ def _file_inventory(
     max_files: int = DEFAULT_FILE_SCAN_LIMIT,
     hash_limit: int = DEFAULT_HASH_LIMIT,
 ) -> dict[str, Any]:
+    """Regular files under ``base``, with paths relative to it.
+
+    The base (e.g. the specimen-controlled /work) may contain symlinks the
+    specimen planted to arbitrary host files; following them would leak those
+    files' size/hash/content into the report. So the walk never follows a
+    symlink below the base, and reaches every directory and hashed file through
+    a descriptor checked to be the inode its parent listed. The tree need not
+    be quiescent: when other runs share the work mount they can still be
+    writing to it, so entries may appear, vanish or be swapped mid-walk. That
+    can make counts and sizes inexact, but a swapped-in symlink or directory is
+    skipped rather than followed.
+    """
     if not base.exists() or not base.is_dir():
         return {"base": str(base), "exists": False, "files": [], "count": 0, "total_bytes": 0,
                 "truncated": False}
-    # The base (e.g. the specimen-controlled /work) may contain symlinks the
-    # specimen planted to arbitrary host files; following them would leak those
-    # files' size/hash/content into the report. Skip symlinks and anything whose
-    # real path escapes the base (this also catches symlinked parent dirs). The
-    # specimen has already exited, so there is no live race.
-    base_real = os.path.realpath(base)
-    prefix = base_real + os.sep
-    files = [
-        path for path in sorted(base.rglob("*"))
-        if not path.is_symlink() and path.is_file()
-        and os.path.realpath(path).startswith(prefix)
-    ]
     rows = []
+    count = 0
     total_bytes = 0
-    for path in files[:max_files]:
-        try:
-            size = path.stat().st_size
-        except OSError:
-            continue
-        total_bytes += size
-        rows.append({
-            "path": path.relative_to(base).as_posix(),
-            "size": size,
-            "sha256": _sha256_file(path, max_bytes=hash_limit),
-        })
-    if len(files) > max_files:
-        for path in files[max_files:]:
-            try:
-                total_bytes += path.stat().st_size
-            except OSError:
-                pass
+    for rel, path, st in _walk_files(str(base), None):
+        count += 1
+        total_bytes += st.st_size
+        if count <= max_files:
+            rows.append({
+                "path": rel,
+                "size": st.st_size,
+                "sha256": _sha256_file(path, st, max_bytes=hash_limit),
+            })
     return {
         "base": str(base),
         "exists": True,
         "files": rows,
-        "count": len(files),
+        "count": count,
         "total_bytes": total_bytes,
-        "truncated": len(files) > max_files,
+        "truncated": count > max_files,
     }
 
 
