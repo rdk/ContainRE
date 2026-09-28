@@ -469,6 +469,23 @@
             "additionalProperties": true
           },
           "default": []
+        },
+        "work_inventory": {
+          "description": "Which part of files.work_mount the report lists as work_files. \"all\" walks the whole mount; \"none\" skips the walk; {\"subdir\": path} walks only that directory, reached without following symbolic links, and reports paths relative to it. When several runs share one work mount, a full walk lists every run's files and takes time proportional to the whole tree, so scope it to the run's own directory. Assertions on work_files.* report an error when the inventory was skipped.",
+          "default": "all",
+          "if": { "type": "string" },
+          "then": { "enum": ["all", "none"] },
+          "else": {
+            "type": "object",
+            "required": ["subdir"],
+            "properties": {
+              "subdir": {
+                "type": "string",
+                "pattern": "^(?!/)(?!(?:.*/)?\\.\\.(?:/|$))[^\\u0000]+$",
+                "description": "Directory relative to files.work_mount. Must not be absolute or contain a '..' component."
+              }
+            }
+          }
         }
       },
       "default": {}

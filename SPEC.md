@@ -255,6 +255,9 @@ runtime:                     # backend fixups; setup/teardown run a shell before
   teardown_commands: []
   command_shell: /bin/sh
   command_timeout_s: 30
+report:
+  work_inventory: all        # all | none | {subdir: <dir under work_mount>}
+  assertions: []             # post-hoc evidence checks; see documentation/reporting.md
 ```
 
 `kill_on` triggers that the tracer observes — `egress_violation` (a blocked

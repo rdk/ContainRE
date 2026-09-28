@@ -56,7 +56,10 @@ Constraints:
 
 - `trace.tracer` must be `none`;
 - stdin is not supported in reuse mode; pass files through the work directory;
-- use a stable `files.work_mount` if you want reuse across multiple runs;
+- use a stable `files.work_mount` if you want reuse across multiple runs. When
+  several runs share it, give each run its own directory under it and set
+  `report.work_inventory: {subdir: <that directory>}`, so each report lists only
+  that run's files and does not walk the whole shared tree;
 - Docker network, mount, device, user, and resource-ceiling changes recreate the
   keyed container once idle. A changed configuration is refused while runs are
   live; drain the container before retrying. Per-run wallclock limits do not

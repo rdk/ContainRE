@@ -68,6 +68,7 @@ runtime:
   docker_user: null       # optional Docker --user value, e.g. "1000:1000"
 
 report:
+  work_inventory: all    # all | none | {subdir: <dir under files.work_mount>}; scope it when runs share a work mount
   assertions:
     - id: no-real-egress
       title: No remote endpoint traffic escaped containment

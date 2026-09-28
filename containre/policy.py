@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import posixpath
 from pathlib import Path
 
 import yaml
@@ -94,7 +95,43 @@ def apply_defaults(policy: dict) -> dict:
 
 
 def validate(policy: dict) -> list[str]:
-    return contracts.validate(policy, "policy.v1.schema.json")
+    errors = contracts.validate(policy, "policy.v1.schema.json")
+    if not errors:
+        # The schema already spells these rules, but it is not bundled with every
+        # install (validation is then soft), and the report trusts this field.
+        try:
+            work_inventory_scope(policy)
+        except ValueError as exc:
+            errors.append(f"['report', 'work_inventory']: {exc}")
+    return errors
+
+
+def work_inventory_scope(policy: dict) -> str | dict[str, str]:
+    """The work-file inventory a policy asks the report for.
+
+    ``"all"`` (also when unset) walks the whole work mount, ``"none"`` skips the
+    walk, and ``{"subdir": path}`` walks only that directory under the work
+    mount; the path comes back normalized. Raises ValueError for anything else,
+    including a subdir that is absolute or has a ``..`` component. Whether the
+    subdir is reachable without following a symbolic link depends on the tree,
+    so the report checks that when it walks.
+    """
+    report = policy.get("report")
+    value = report.get("work_inventory", "all") if isinstance(report, dict) else "all"
+    if value in ("all", "none"):
+        return value
+    subdir = value.get("subdir") if isinstance(value, dict) else None
+    if not isinstance(subdir, str):
+        raise ValueError(
+            "report.work_inventory must be 'all', 'none' or {subdir: <relative path>}, "
+            f"got {value!r}"
+        )
+    if not subdir or subdir.startswith("/") or "\0" in subdir or ".." in subdir.split("/"):
+        raise ValueError(
+            "report.work_inventory.subdir must be a relative path inside the work mount "
+            f"with no '..' component, got {subdir!r}"
+        )
+    return {"subdir": posixpath.normpath(subdir)}
 
 
 def load_policy(path: str | Path) -> dict:

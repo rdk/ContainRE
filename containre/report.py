@@ -6,12 +6,15 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .policy import work_inventory_scope
 
 NETWORK_OPS = {
     "socket", "connect", "connect_result", "socket_error", "send", "recv",
@@ -184,31 +187,76 @@ def _walk_files(
             yield f"{rel_dir}{name}", path, st
 
 
+def _subdir_identity(base: Path, subdir: str) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of ``base/subdir``, opened one component at a time
+    without following a symlink below ``base``; None if it is missing or not a
+    directory. Raises ValueError if a component is a symlink."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    try:
+        fd = os.open(base, flags)
+    except OSError:
+        return None
+    try:
+        for part in subdir.split("/"):
+            if part in ("", "."):
+                continue
+            try:
+                child = os.open(part, flags | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError:
+                try:
+                    is_link = stat.S_ISLNK(os.lstat(part, dir_fd=fd).st_mode)
+                except OSError:
+                    is_link = False
+                if is_link:
+                    raise ValueError(
+                        f"report.work_inventory.subdir {subdir!r} passes through the symbolic "
+                        f"link {part!r}; the inventory does not follow symlinks"
+                    ) from None
+                return None
+            os.close(fd)
+            fd = child
+        st = os.fstat(fd)
+        return st.st_dev, st.st_ino
+    finally:
+        os.close(fd)
+
+
 def _file_inventory(
     base: Path,
     *,
     max_files: int = DEFAULT_FILE_SCAN_LIMIT,
     hash_limit: int = DEFAULT_HASH_LIMIT,
+    subdir: str | None = None,
 ) -> dict[str, Any]:
-    """Regular files under ``base``, with paths relative to it.
+    """Regular files under ``base``, or under ``base/subdir`` when given; paths
+    are relative to that root. Raises ValueError if ``subdir`` passes through a
+    symlink.
 
     The base (e.g. the specimen-controlled /work) may contain symlinks the
     specimen planted to arbitrary host files; following them would leak those
     files' size/hash/content into the report. So the walk never follows a
-    symlink below the base, and reaches every directory and hashed file through
+    symlink below the root, and reaches every directory and hashed file through
     a descriptor checked to be the inode its parent listed. The tree need not
     be quiescent: when other runs share the work mount they can still be
     writing to it, so entries may appear, vanish or be swapped mid-walk. That
     can make counts and sizes inexact, but a swapped-in symlink or directory is
     skipped rather than followed.
     """
-    if not base.exists() or not base.is_dir():
-        return {"base": str(base), "exists": False, "files": [], "count": 0, "total_bytes": 0,
-                "truncated": False}
+    root = base if subdir is None else base / subdir
+    scope = {} if subdir is None else {"subdir": subdir}
+    if subdir is None:
+        found = base.exists() and base.is_dir()
+        identity = None
+    else:
+        identity = _subdir_identity(base, subdir)
+        found = identity is not None
+    if not found:
+        return {"base": str(root), **scope, "exists": False, "files": [], "count": 0,
+                "total_bytes": 0, "truncated": False}
     rows = []
     count = 0
     total_bytes = 0
-    for rel, path, st in _walk_files(str(base), None):
+    for rel, path, st in _walk_files(str(root), identity):
         count += 1
         total_bytes += st.st_size
         if count <= max_files:
@@ -218,13 +266,54 @@ def _file_inventory(
                 "sha256": _sha256_file(path, st, max_bytes=hash_limit),
             })
     return {
-        "base": str(base),
+        "base": str(root),
+        **scope,
         "exists": True,
         "files": rows,
         "count": count,
         "total_bytes": total_bytes,
         "truncated": count > max_files,
     }
+
+
+def _skipped_inventory(
+    root: Path, *, exists: bool, reason: str, subdir: str | None = None, error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "base": str(root),
+        **({} if subdir is None else {"subdir": subdir}),
+        "exists": exists,
+        "skipped": reason,
+        **({} if error is None else {"error": error}),
+        "files": [],
+        "count": 0,
+        "total_bytes": 0,
+        "truncated": False,
+    }
+
+
+def _work_inventory(work_base: Path, policy: dict[str, Any], *, max_files: int) -> dict[str, Any]:
+    """The work-mount inventory, scoped by the policy's ``report.work_inventory``.
+
+    ``all`` (the default) is the historical inventory, unchanged. ``none``, and
+    a scope that cannot be used safely, walk nothing and say why under
+    ``skipped``: ``"policy"``, or ``"invalid"`` with an ``error``.
+    """
+    try:
+        scope = work_inventory_scope(policy)
+    except ValueError as exc:
+        return _skipped_inventory(work_base, exists=work_base.is_dir(), reason="invalid",
+                                  error=str(exc))
+    if scope == "all":
+        return _file_inventory(work_base, max_files=max_files)
+    if scope == "none":
+        return _skipped_inventory(work_base, exists=work_base.is_dir(), reason="policy")
+    subdir = scope["subdir"]
+    try:
+        return _file_inventory(work_base, max_files=max_files, subdir=subdir)
+    except ValueError as exc:
+        return _skipped_inventory(work_base / subdir, exists=False, reason="invalid",
+                                  subdir=subdir, error=str(exc))
 
 
 def _static_compact(run_dir: Path) -> dict[str, Any]:
@@ -744,6 +833,14 @@ def _evaluate_assertion(actual: Any, op: str, expected: Any, match: str) -> tupl
     return False, f"unsupported assertion op: {op!r}"
 
 
+def _work_inventory_skipped(summary: dict[str, Any]) -> str | None:
+    """Why the report took no work-file inventory, or None if it took one."""
+    work_files = summary.get("work_files") or {}
+    if not work_files.get("skipped"):
+        return None
+    return work_files.get("error") or "report.work_inventory is 'none'"
+
+
 def evaluate_assertions(
     summary: dict[str, Any],
     assertions: list[dict[str, Any]] | None,
@@ -767,6 +864,24 @@ def evaluate_assertions(
         expected = spec.get("value")
         severity = str(spec.get("severity") or ASSERTION_FAILURE_SEVERITY)
         match = str(spec.get("match") or "glob")
+        skipped = _work_inventory_skipped(summary)
+        if skipped and (subject == "work_files" or subject.startswith("work_files.")):
+            # A skipped inventory reads as empty; it must not satisfy a negative
+            # op (none_match, eq 0, ...) any more than an unresolved subject.
+            results.append({
+                "id": aid,
+                "title": spec.get("title") or aid,
+                "status": "error",
+                "severity": severity,
+                "subject": subject,
+                "op": op,
+                "match": None,
+                "expected": expected,
+                "actual": None,
+                "message": f"subject {subject!r} needs the work-file inventory, "
+                           f"which was not taken: {skipped}",
+            })
+            continue
         actual = _get_subject(summary, subject) if subject else _MISSING
         if actual is _MISSING and op not in ("exists", "not_exists"):
             # An unresolved subject (typo / renamed metric) must not vacuously
@@ -890,7 +1005,7 @@ def summarize_run_dir(
         "detections": detections,
         "snapshots": _snapshots(run_dir, events),
         "artifacts": _file_inventory(run_dir / "files", max_files=max_files),
-        "work_files": _file_inventory(work_base, max_files=max_files),
+        "work_files": _work_inventory(work_base, policy, max_files=max_files),
         "file_events": [
             {"op": op, "path": path, "decoy": decoy, "count": count}
             for (op, path, decoy), count in sorted(files.items())
@@ -910,6 +1025,8 @@ def summarize_run_dir(
 def markdown(summary: dict[str, Any], *, file_limit: int = 100) -> str:
     metrics = summary.get("metrics", {})
     assertions = summary.get("assertions", {})
+    work_files_skipped = _work_inventory_skipped(summary)
+    work_files_cell = "skipped" if work_files_skipped else metrics.get("work_files.count", 0)
     lines = [
         "# ContainRE Run Summary",
         "",
@@ -958,7 +1075,7 @@ def markdown(summary: dict[str, Any], *, file_limit: int = 100) -> str:
         f"| h2 gRPC negative feature probes | {metrics.get('network.h2_grpc_replay_negative_feature_count', 0)} |",
         f"| Detections | {metrics.get('detections.count', 0)} |",
         f"| Artifacts | {metrics.get('artifacts.count', 0)} |",
-        f"| Work files | {metrics.get('work_files.count', 0)} |",
+        f"| Work files | {work_files_cell} |",
         f"| Snapshots | {metrics.get('snapshots.count', 0)} |",
         f"| Static call edges | {metrics.get('static.call_edges.count', 0)} |",
         "",
@@ -1062,7 +1179,9 @@ def markdown(summary: dict[str, Any], *, file_limit: int = 100) -> str:
 
     lines += ["", "## Work Files", ""]
     work_files = summary.get("work_files", {})
-    if work_files.get("files"):
+    if work_files_skipped:
+        lines.append(f"- not inventoried: {work_files_skipped}")
+    elif work_files.get("files"):
         lines.append(f"Base: `{work_files.get('base')}`")
         for row in work_files["files"][:file_limit]:
             digest = f" sha256=`{row['sha256']}`" if row.get("sha256") else ""
